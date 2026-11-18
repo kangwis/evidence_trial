@@ -622,4 +622,75 @@ describe('DUPLICATE VALIDATOR', () => {
     // untuk skenario ini -- lihat rangkuman audit bagian 9 (item terbuka).
     expect(result.duplicatePairs[0].action).not.toBe('MERGE');
   });
+    // ==========================================================
+  // D-13: excerpt identik + subtopic SAMA + attribute berbeda → PRESERVE
+  // (replika E013/E014/E015 di pZ1z7jT170s, segmen 48)
+  // ==========================================================
+  const LAYAR_EXCERPT =
+    'Menggunakan layar Super AMOLED berukuran 6,7 inci dengan resolusi Full HD+';
+  const LAYAR_COORDS = { chunk_index: 1, segment_start_index: 48, segment_end_index: 48 };
+
+  const makeLayar = (
+    id: string,
+    subtopic: string,
+    attribute: string,
+    value: number | null,
+    unit: string | null
+  ): EvidenceItem => ({
+    evidence_id: id, topic: 'display', subtopic, type: 'FACT',
+    claim: `Samsung Galaxy A18 ${attribute}`,
+    value, unit, attribute, attribute_value: null,
+    context: 'Samsung Galaxy A18', comparison_target: null,
+    reviewer_assessment: null, certainty: 'explicit',
+    source_excerpt: LAYAR_EXCERPT,
+    source_coordinates: LAYAR_COORDS
+  });
+
+  test('D-13: subtopic sama, attribute berbeda (panel_type vs screen_size) → PRESERVE, tidak ada yang dibuang', () => {
+    const result = DuplicateValidator.detect([
+      makeLayar('E013', 'layar', 'panel_type', null, null),
+      makeLayar('E014', 'layar', 'screen_size', 6.7, 'inci')
+    ]);
+
+    expect(result.duplicatePairs).toHaveLength(1);
+    expect(result.duplicatePairs[0].action).toBe('PRESERVE');
+    expect(result.duplicatePairs[0].keptId).toBeUndefined();
+    expect(result.duplicatePairs[0].mergedEvidence).toBeUndefined();
+  });
+
+  test('D-13b: tiga fakta layar dari satu segmen → semua pasangan PRESERVE', () => {
+    const result = DuplicateValidator.detect([
+      makeLayar('E013', 'layar', 'panel_type', null, null),
+      makeLayar('E014', 'layar', 'screen_size', 6.7, 'inci'),
+      makeLayar('E015', 'resolusi', 'resolution', null, null)
+    ]);
+
+    expect(result.duplicatePairs).toHaveLength(3);
+    for (const p of result.duplicatePairs) {
+      expect(p.action).toBe('PRESERVE');
+    }
+  });
+
+  test('D-13c (kontrol): attribute dan value sama → tetap dedup (KEEP_FIRST)', () => {
+    const result = DuplicateValidator.detect([
+      makeLayar('E100', 'layar', 'panel_type', null, null),
+      makeLayar('E101', 'layar', 'panel_type', null, null)
+    ]);
+
+    expect(result.duplicatePairs).toHaveLength(1);
+    expect(result.duplicatePairs[0]).toMatchObject({
+      action: 'KEEP_FIRST',
+      keptId: 'E100'
+    });
+  });
+
+  test('D-13d: attribute sama, attribute_value berbeda → PRESERVE', () => {
+    const a = makeLayar('E200', 'warna', 'color_option', null, null);
+    const b = makeLayar('E201', 'warna', 'color_option', null, null);
+    a.attribute_value = 'Black';
+    b.attribute_value = 'Mint';
+
+    const result = DuplicateValidator.detect([a, b]);
+    expect(result.duplicatePairs[0].action).toBe('PRESERVE');
+  });
 });
