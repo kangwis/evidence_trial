@@ -562,6 +562,23 @@ function resolveIdenticalOccurrence(
     };
   }
 
+  // Penjaga aspek berbeda (jalur excerpt identik). Dua evidence dengan
+  // source occurrence dan excerpt yang sama TIDAK otomatis duplikat bila
+  // attribute / attribute_value / value-nya berbeda (mis. panel_type vs
+  // screen_size dari satu kalimat layar). Tanpa penjaga ini, subtopic yang
+  // sama membuat salah satu fakta dibuang oleh KEEP_BEST/KEEP_FIRST.
+  if (isDistinctAspect(evidenceA, evidenceB)) {
+    return {
+      evidence_id_a: evidenceA.evidence_id || '',
+      evidence_id_b: evidenceB.evidence_id || '',
+      action: 'PRESERVE',
+      reason:
+        'Source occurrence dan source excerpt identik, tetapi attribute/' +
+        'attribute_value/value berbeda -- aspek berbeda dari satu segmen. ' +
+        'Preserve kedua evidence, bukan KEEP_FIRST/KEEP_BEST.'
+    };
+  }
+
   // Gunakan skor kelengkapan yang lebih komprehensif (Fix #2)
   const scoreA = getCompletenessScore(evidenceA);
   const scoreB = getCompletenessScore(evidenceB);
