@@ -942,8 +942,9 @@ function printRun(res: ReplayResult, full: boolean, currentHash: string): void {
 
   const quar = items.filter(i => !i.accepted);
   const shown = full ? quar : quar.slice(0, 40);
-  for (const q of shown) {
-    console.log(`  [c${q.chunk}#${q.pos}] ${q.blocking.join('+') || '-'} | ${q.type} | ${trunc(q.claim, 70)}`);
+    for (const q of shown) {
+    console.log(`  [c${q.chunk}#${q.pos}] ${q.blocking.join('+') || '-'} | ${q.type} | sub=${q.subtopic ?? 'null'} | ${trunc(q.claim, 70)}`);
+    console.log(`        EXCERPT: ${trunc(q.excerpt, 110)}`);
     console.log(`        ${trunc(q.reason, 150)}`);
   }
   if (!full && quar.length > shown.length) {
@@ -955,6 +956,8 @@ function printRun(res: ReplayResult, full: boolean, currentHash: string): void {
     for (const f of flg) {
       console.log(`  [c${f.chunk}#${f.pos}] flag=${f.flags.join('+')} | ${f.type} | ${trunc(f.claim, 70)}`);
     }
+    const noCoord = items.filter(i => i.accepted && !i.sourceCoordinates).length;
+    console.log(`  Diterima TANPA koordinat/timestamp: ${noCoord}`);
   }
 }
 
