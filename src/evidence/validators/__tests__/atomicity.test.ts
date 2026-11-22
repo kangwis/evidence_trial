@@ -361,4 +361,234 @@ describe('ATOMICITY: nama model dan label jaringan bukan konjungsi', () => {
     expect(result.status).toBe('SUSPECT');
     expect(result.severity).toBe('MEDIUM');
   });
+
+  test.each([
+    'Samsung Galaxy A27 tersedia dalam varian RAM 8 GB dan ROM 256 GB',
+    'Samsung Galaxy A27 tersedia dalam varian ROM 256 GB dan RAM 8 GB',
+    'Samsung Galaxy A27 memiliki opsi RAM 8 GB dan storage 256 GB',
+    'Samsung Galaxy A27 hadir dengan varian 8 GB / 256 GB'
+  ])('konfigurasi varian RAM/penyimpanan tidak HIGH: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(true);
+    expect(result.severity).not.toBe('HIGH');
+  });
+
+  test.each([
+    'RAM 8 GB dan ROM 256 GB',
+    'ROM 256 GB dan RAM 8 GB',
+    'RAM 8 GB dan storage 256 GB'
+  ])('konfigurasi tanpa konteks varian tetap HIGH: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+
+  test('price claim + konfigurasi varian → MEDIUM', () => {
+    const result = V(
+      'Harga Samsung Galaxy A27 varian RAM 8 GB dan ROM 256 GB adalah Rp 4.499.000'
+    );
+
+    expect(result.pass).toBe(true);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('MEDIUM');
+  });
+
+  test('price claim + fakta durasi independen tetap HIGH meski N2 aktif', () => {
+    const result = V(
+      'Daya tahan baterai mencapai 17 jam 42 menit dan harga varian RAM 8 GB / 256 GB adalah Rp 4.499.000'
+    );
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+
+  test('price claim + fakta baterai independen tetap HIGH', () => {
+    const result = V(
+      'Harga varian RAM 8 GB / 256 GB adalah Rp 4.499.000 dan baterai 5000 mAh'
+    );
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+});
+
+describe('ATOMICITY: variasi susunan konfigurasi RAM dan penyimpanan', () => {
+  test.each([
+    'Varian penyimpanan 128 GB dibekali RAM 6 GB',
+    'Varian penyimpanan 256 GB dibekali RAM 8 GB',
+    'Opsi RAM 4 GB untuk varian internal 128 GB',
+    'Varian penyimpanan 128 GB dilengkapi RAM 6 GB',
+  ])('konfigurasi varian tidak diblokir: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(true);
+    expect(result.severity).not.toBe('HIGH');
+  });
+
+  test.each([
+    'RAM 8 GB dan storage 256 GB',
+    'ROM 256 GB dan RAM 8 GB',
+    'Penyimpanan 128 GB dan RAM 6 GB',
+  ])('konfigurasi tanpa konteks varian tetap HIGH: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+});
+
+
+describe('ATOMICITY P1: konteks varian harus melekat pada konfigurasi', () => {
+  test.each([
+    'Samsung Galaxy A27 tersedia dalam varian RAM 8 GB dan ROM 256 GB',
+    'Samsung Galaxy A27 tersedia dalam varian ROM 256 GB dan RAM 8 GB',
+    'Samsung Galaxy A27 memiliki opsi RAM 8 GB dan storage 256 GB',
+    'Samsung Galaxy A27 hadir dengan varian 8 GB / 256 GB',
+    'Varian penyimpanan 128 GB dibekali RAM 6 GB',
+    'Varian penyimpanan 256 GB dilengkapi RAM 8 GB',
+    'Opsi RAM 4 GB untuk varian internal 128 GB',
+  ])('PASS: konteks varian melekat pada konfigurasi: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(true);
+    expect(result.status).toBe('PASS');
+    expect(result.severity).toBe('LOW');
+  });
+
+  test.each([
+    'Samsung Galaxy A27 memiliki opsi warna hitam, RAM 8 GB dan storage 256 GB',
+    'Samsung Galaxy A27 tersedia dalam varian warna hitam. RAM 8 GB dan storage 256 GB',
+    'Samsung Galaxy A27 memiliki varian warna hitam dan RAM 8 GB serta storage 256 GB',
+    'RAM 8 GB dan storage 256 GB dengan opsi warna hitam',
+  ])('HIGH: konteks varian tidak relevan dengan konfigurasi: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+
+  test.each([
+    'RAM 8 GB dan ROM 256 GB',
+    'ROM 256 GB dan RAM 8 GB',
+    'RAM 8 GB dan storage 256 GB',
+    'Penyimpanan 128 GB dan RAM 6 GB',
+  ])('HIGH: konfigurasi tanpa konteks varian: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+});
+
+
+describe('ATOMICITY P1: label jaringan sebagai identitas varian', () => {
+  test.each([
+    'Samsung Galaxy Tab A11 Plus varian Wi-Fi Only RAM 6GB internal 128GB dibanderol dengan harga Rp 4.499.000',
+    'Samsung Galaxy Tab A11 Plus varian 5G RAM 6GB internal 128GB dibanderol dengan harga Rp 5.999.000',
+    'Harga Samsung Galaxy Tab A11 varian Wi-Fi Only 4 GB / 64 GB adalah Rp 2.699.000',
+    'Harga Samsung Galaxy Tab A11 varian LTE 4 GB / 64 GB adalah Rp 3.499.000',
+  ])('price claim identitas jaringan-varian tetap MEDIUM: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(true);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('MEDIUM');
+  });
+
+  test.each([
+    'Samsung Galaxy A27 memiliki varian warna hitam dan RAM 8 GB serta storage 256 GB',
+    'Samsung Galaxy A27 memiliki opsi warna hitam, RAM 8 GB dan storage 256 GB',
+  ])('konteks warna tidak mengaktifkan normalisasi: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+});
+
+describe('ATOMICITY P1 lanjutan: variasi konfigurasi varian', () => {
+  test.each([
+    'Samsung Galaxy A08 tersedia dalam varian RAM 4 GB / 64 GB',
+    'Samsung Galaxy A27 tersedia dalam varian 128 GB memiliki RAM 8 GB',
+    'Samsung Galaxy A27 tersedia dalam varian 256 GB dibekali RAM 8 GB',
+    'Varian penyimpan 128 GB dibekali RAM 6 GB',
+    'Varian penyimpanan 128 GB dibekali RAM 6 GB',
+  ])('PASS: konfigurasi varian dikenali: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(true);
+    expect(result.status).toBe('PASS');
+    expect(result.severity).toBe('LOW');
+  });
+});
+
+describe('ATOMICITY P1 lanjutan: konteks varian tidak relevan', () => {
+  test.each([
+    'Samsung Galaxy A27 memiliki varian warna hitam, RAM 4 GB / 64 GB',
+    'Samsung Galaxy A27 memiliki varian warna hitam dan RAM 8 GB serta storage 256 GB',
+    'Samsung Galaxy A27 tersedia dalam varian warna hitam. RAM 8 GB dan storage 256 GB',
+    'RAM 4 GB / 64 GB tersedia dengan opsi warna hitam',
+    'Varian warna hitam memiliki RAM 8 GB dan storage 256 GB',
+  ])('HIGH: konteks warna tidak mengaktifkan P1: %s', claim => {
+    const result = V(claim);
+
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe('SUSPECT');
+    expect(result.severity).toBe('HIGH');
+  });
+});
+
+describe('ATOMICITY N03: tanda plus dalam nama resolusi', () => {
+  test.each([
+    'Layar mendukung resolusi Full HD+ 1080 x 2340 piksel',
+    'Resolusi layar Full HD+ memberikan tampilan tajam',
+  ])('tidak HIGH: %s', claim => {
+    const result = V(claim);
+    expect(result.severity).not.toBe('HIGH');
+  });
+
+  test.each([
+    'RAM 8 GB + storage 256 GB',
+    'RAM 8 GB dan storage 256 GB',
+  ])('compound sejati tetap HIGH: %s', claim => {
+    const result = V(claim);
+    expect(result.severity).toBe('HIGH');
+  });
+});
+
+describe('ATOMICITY N04: nama chipset dan kontras chipset', () => {
+  test.each([
+    'Snapdragon 6 Gen 3 digunakan pada perangkat ini',
+    'Perangkat menggunakan chipset Dimensity 7300',
+    'Chipset Exynos 1480 memberikan performa yang baik',
+    'Helio G99 digunakan sebagai prosesor utama',
+  ])('tidak HIGH: %s', claim => {
+    const result = V(claim);
+    expect(result.severity).not.toBe('HIGH');
+  });
+
+  test.each([
+    'Snapdragon 6 Gen 3 dan bukan Exynos',
+    'Menggunakan Snapdragon 6 Gen 3, bukan Dimensity 7300',
+  ])('kontras identitas chipset tidak dianggap dua fakta: %s', claim => {
+    const result = V(claim);
+    expect(result.severity).not.toBe('HIGH');
+  });
+
+  test.each([
+    'Snapdragon 6 Gen 3 dan suhu mencapai 41 derajat Celsius',
+    'Dimensity 7300 dan RAM 8 GB',
+  ])('fakta independen tetap HIGH: %s', claim => {
+    const result = V(claim);
+    expect(result.severity).toBe('HIGH');
+  });
 });
