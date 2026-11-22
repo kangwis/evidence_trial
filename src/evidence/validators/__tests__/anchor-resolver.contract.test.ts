@@ -379,3 +379,30 @@ describe('CONTRACT — GroundingValidator pasca-redesign (existence-only)', () =
     expect(result.status).toBe('FAIL');
   });
 });
+
+const segs = [
+  { index: 11, start: '00:00:35,420', end: '00:00:38,060', text: 'Layarnya PLS LCD berukuran' },
+  { index: 12, start: '00:00:38,060', end: '00:00:39,979', text: 'di 6,7 inci,' },
+  { index: 34, start: '00:01:33,959', end: '00:01:42,540', text: 'Oktober 2026, layarnya Super AMOLED berukuran di 6,7 inci, layarnya sudah Full HD+, di mana' },
+  { index: 42, start: '00:02:38,759', end: '00:02:46,620', text: 'Layarnya PLS LCD berukuran di 6,7 inci, sistem operasinya menggunakan Android 17 dan' }
+];
+const ctx: EvidenceContext = {
+  chunkIndex: 0,
+  chunkSegments: segs,
+  chunkText: segs.map(s => s.text).join(' ')
+};
+
+describe('anchor = nilai yang di-echo dari excerpt (pola produksi 871JKOxrsNM)', () => {
+  test('KARAKTERISASI: subtopic "6,7-inci" mendukung ketiga kandidat → AMBIGUOUS', () => {
+    const r = resolveProvenanceAnchor('berukuran di 6,7 inci', '6,7-inci', ctx);
+    expect(r.status).toBe('AMBIGUOUS');
+    expect(r.coordinates).toBeNull();
+  });
+
+  // Dipindah ke test biasa setelah resolver fase 3 (product-aware) ada.
+  test.fails('TARGET: klaim "Galaxy A18" harus resolve ke segmen 34', () => {
+    // butuh API baru, mis. resolveProvenanceAnchor(excerpt, anchor, ctx, { productHint: 'Galaxy A18' })
+    // plus fixture segmen 25-26 ("Samsung Galaxy A18") agar mention terdekat bisa dicari.
+    expect(false).toBe(true);
+  });
+});
