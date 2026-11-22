@@ -200,6 +200,18 @@ export interface SalvageStats {
   truncated: boolean;  // objek terakhir tidak lengkap (output terpotong)
 }
 
+export interface EvidenceIdMetadata {
+  position: number;
+  /**
+   * Asal ID:
+   * - 'model': model menulis evidence_id di JSON
+   * - 'auto-fill': parser mengisi karena kosong
+   * - 'invalid': item bukan objek, tidak bisa diisi
+   */
+  source: 'model' | 'auto-fill' | 'invalid';
+  originalId: string | null;
+}
+
 function parseEvidenceJSONCore(rawOutput: string): {
   evidence: any[];
   strategy: ParseStrategy;
@@ -471,18 +483,47 @@ function salvageEvidenceObjects(raw: string): { evidence: any[]; stats: SalvageS
 // mencegah konflik dengan referensi model ke ID tersebut.
 //
 // Return: jumlah item yang di-fill (untuk logging di caller).
-function ensureEvidenceIds(evidence: any[]): number {
+function ensureEvidenceIds(evidence: any[]): {
+  filled: number;
+  metadata: EvidenceIdMetadata[];
+} {
+  const metadata: EvidenceIdMetadata[] = [];
   let filled = 0;
+
   for (let i = 0; i < evidence.length; i++) {
     const item = evidence[i];
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const position = i + 1;
+
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      metadata.push({
+        position,
+        source: 'invalid',
+        originalId: null
+      });
+      continue;
+    }
+
     const current = item.evidence_id;
-    if (current === undefined || current === null || String(current).trim() === '') {
-      item.evidence_id = `E${String(i + 1).padStart(3, '0')}`;
+    const originalId =
+      current === undefined || current === null
+        ? null
+        : String(current).trim() || null;
+
+    const missing = originalId === null;
+
+    if (missing) {
+      item.evidence_id = `E${String(position).padStart(3, '0')}`;
       filled++;
     }
+
+    metadata.push({
+      position,
+      source: missing ? 'auto-fill' : 'model',
+      originalId
+    });
   }
-  return filled;
+
+  return { filled, metadata };
 }
 
 /**
@@ -496,7 +537,7 @@ export function parseEvidenceJSON(rawOutput: string): EvidenceItem[] {
   // Hanya log warning jika parse SUCCESS (strategy != null) dan ada
   // evidence yang di-fill — konfirmasi model lupa, bukan parse gagal.
   if (strategy !== null && evidence.length > 0) {
-    const filled = ensureEvidenceIds(evidence);
+    const { filled } = ensureEvidenceIds(evidence);
     if (filled > 0) {
       console.warn(
         `⚠️ ${filled}/${evidence.length} evidence tanpa evidence_id ` +
@@ -522,23 +563,27 @@ export function parseEvidenceJSONDetailed(rawOutput: string): {
   status: 'SUCCESS' | 'FAILED';
   evidence: any[];
   strategy: ParseStrategy;
+  idMetadata: EvidenceIdMetadata[];
   error?: string;
   salvage?: SalvageStats;
 } {
   const { evidence, strategy, salvage } = parseEvidenceJSONCore(rawOutput);
 
-  if (strategy === null) {
+    if (strategy === null) {
     return {
       status: 'FAILED',
       evidence: [],
       strategy: null,
+      idMetadata: [],
       error: 'Gagal parse JSON dari rawOutput (semua strategi fallback gagal)'
     };
   }
 
-  // FIX 3: auto-fill evidence_id jika model tidak emit.
+    let idMetadata: EvidenceIdMetadata[] = [];
+
   if (evidence.length > 0) {
-    const filled = ensureEvidenceIds(evidence);
+    const { filled, metadata } = ensureEvidenceIds(evidence);
+    idMetadata = metadata;
     if (filled > 0) {
       console.warn(
         `⚠️ ${filled}/${evidence.length} evidence tanpa evidence_id ` +
@@ -548,8 +593,8 @@ export function parseEvidenceJSONDetailed(rawOutput: string): {
   }
 
   return salvage
-    ? { status: 'SUCCESS', evidence, strategy, salvage }
-    : { status: 'SUCCESS', evidence, strategy };
+    ? { status: 'SUCCESS', evidence, strategy, idMetadata, salvage }
+    : { status: 'SUCCESS', evidence, strategy, idMetadata };
 }
 
 // ============================================================
