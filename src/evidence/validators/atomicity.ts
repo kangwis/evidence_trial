@@ -182,22 +182,100 @@ export const AtomicityValidator = {
       }
     };
 
-    // P1: RAM + storage hanya dinormalisasi sebagai konfigurasi varian
-    // jika klaim menyatakan konteks varian secara eksplisit.
-    // Pasangan generik "RAM 8 GB dan storage 256 GB" tetap compound.
-    const hasExplicitVariantContext =
-      /\b(?:varian|tersedia\s+dalam\s+varian|hadir\s+dengan)\b/i.test(normalizedClaim);
+    
+    // P1: RAM + penyimpanan hanya dinormalisasi sebagai konfigurasi
+    // varian jika konteks varian dinyatakan secara eksplisit.
+    // Konfigurasi generik tetap dianggap compound.
+    // Konteks harus melekat langsung pada fragmen RAM/storage yang
+    // dinormalisasi. Kata "varian/opsi" yang hanya menerangkan warna
+    // atau atribut lain tidak boleh mengaktifkan P1.
+    const hasLocalVariantContext = (
+      text: string,
+      match: RegExpMatchArray
+    ): boolean => {
+      const matchIndex = match.index ?? 0;
+      const prefix = text.slice(Math.max(0, matchIndex - 64), matchIndex);
 
-    if (hasExplicitVariantContext) {
-      normalizeAtomicFragment(
-        /\bram\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah)){0,8}\s+\b(?:internal(?:\s+penyimpanan)?|penyimpanan|storage)\s+\d+(?:[.,]\d+)?\s*gb\b/i
+      const networkQualifier =
+        String.raw`(?:\s+(?:wi-?fi(?:\s+only)?|lte|[345]g))*`;
+
+      const directVariantPrefix = new RegExp(
+        String.raw`\b(?:(?:tersedia\s+dalam\s+)?varian|opsi)${networkQualifier}\s*$`,
+        'i'
       );
-      // P1b: Notasi singkat konfigurasi varian, misalnya "4 GB / 64 GB".
-      // Hanya dinormalisasi dalam konteks varian eksplisit.
-      normalizeAtomicFragment(
-        /\b\d+(?:[.,]\d+)?\s*gb\s*\/\s*\d+(?:[.,]\d+)?\s*gb\b/i
+
+      const directAvailabilityPrefix = new RegExp(
+        String.raw`\bhadir\s+dengan(?:\s+varian)?${networkQualifier}\s*$`,
+        'i'
       );
+
+      return (
+        directVariantPrefix.test(prefix) ||
+        directAvailabilityPrefix.test(prefix)
+      );
+    };
+
+    // Flag khusus P1. Jangan memakai hasNormalizedAtomicFragment untuk
+    // pengecualian harga karena flag tersebut juga diaktifkan oleh N2-N14.
+    let hasNormalizedVariantConfig = false;
+
+    // Salinan klaim untuk pemeriksaan fakta independen pada price claim.
+    // Salinan ini hanya akan menghapus konfigurasi varian P1, bukan
+    // fragmen lain yang dinormalisasi oleh aturan atomic lainnya.
+    let claimForVariantPriceCheck = normalizedClaim;
+
+    
+    const variantConfigPatterns: RegExp[] = [
+      // RAM -> label penyimpanan:
+      // "varian RAM 8 GB dan ROM 128 GB"
+      // "RAM 8 GB memiliki internal 128 GB"
+      /\bram\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi))){0,8}\s+\b(?:rom|storage|penyimpan(?:an)?(?:\s+internal)?|memori(?:\s+internal)?|internal(?:\s+penyimpanan)?)\s+\d+(?:[.,]\d+)?\s*gb\b/i,
+
+      // Label penyimpanan -> RAM:
+      // "varian penyimpanan 128 GB dibekali RAM 6 GB"
+      // "varian ROM 128 GB dan RAM 8 GB"
+      /\b(?:rom|storage|penyimpan(?:an)?(?:\s+internal)?|memori(?:\s+internal)?|internal(?:\s+penyimpanan)?)\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi))){0,8}\s+\bram\s+\d+(?:[.,]\d+)?\s*gb\b/i,
+
+      // Varian RAM dengan notasi slash:
+      // "varian RAM 4 GB / 64 GB"
+      /\bram\s+\d+(?:[.,]\d+)?\s*gb\s*\/\s*\d+(?:[.,]\d+)?\s*gb\b/i,
+
+      // Varian kapasitas tanpa label penyimpanan:
+      // "varian 128 GB memiliki RAM 8 GB"
+      // "varian 256 GB dibekali RAM 8 GB"
+      /\b\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi))){0,8}\s+\bram\s+\d+(?:[.,]\d+)?\s*gb\b/i,
+
+      // Notasi ringkas:
+      // "varian 4 GB / 64 GB"
+      /\b\d+(?:[.,]\d+)?\s*gb\s*\/\s*\d+(?:[.,]\d+)?\s*gb\b/i
+    ];
+
+    for (const pattern of variantConfigPatterns) {
+      // Cari fragmen pada klaim yang belum dinormalisasi agar posisi
+      // konteks lokal dapat diuji terhadap teks asli.
+      const match = normalizedClaim.match(pattern);
+      if (!match || !hasLocalVariantContext(normalizedClaim, match)) {
+        continue;
+      }
+
+      const nextClaim = claimForAtomicity.replace(
+        pattern,
+        ' fakta_atomic '
+      );
+
+      if (nextClaim !== claimForAtomicity) {
+        hasNormalizedVariantConfig = true;
+        hasNormalizedAtomicFragment = true;
+        claimForAtomicity = nextClaim;
+
+        // Hapus hanya konfigurasi varian dari salinan pemeriksaan harga.
+        claimForVariantPriceCheck = claimForVariantPriceCheck.replace(
+          pattern,
+          ' fakta_atomic '
+        );
+      }
     }
+
 
     // P2: satu metrik yang berubah dari nilai lama menjadi nilai baru.
     normalizeAtomicFragment(
@@ -245,11 +323,15 @@ export const AtomicityValidator = {
       .replace(/\b[a-z]*\d+\s+plus\b/gi, ' [model_plus] ')   // "A11 Plus", "Note 20 Plus"
       .replace(/\b\d+g\b/gi, ' [network_generation] ')        // "5G", "4G"
       .replace(/\blte\b/gi, ' [network_lte] ')                // "LTE"
-      .replace(/\bwi-?fi(?:\s+only)?\b/gi, ' [wifi_variant] '); // "Wi-Fi Only"
+      .replace(/\bwi-?fi(?:\s+only)?\b/gi, ' [wifi_variant] ') // "Wi-Fi Only"
+      .replace(
+        /\b(?:snapdragon|exynos|dimensity|helio)\s+[a-z]?\d+(?:\s+gen\s+\d+)?\b/gi,
+        ' [chipset_model] '
+      );
 
     const hasConjunctionDan =
       /\s+(dan|serta|plus|kemudian)\s+/i.test(claimForConjunction) ||
-      /[&+]/.test(claimForConjunction);
+      /\s[&+]\s/.test(claimForConjunction);
 
     // Angka model dan label jaringan tidak boleh dihitung sebagai
     // nilai numerik dalam pemeriksaan compound berbasis konjungsi.
@@ -309,13 +391,19 @@ export const AtomicityValidator = {
       /\b(?:harga|dibanderol|seharga|berharga)\b/i.test(claimNoRange) &&
       /\brp\.?\s*\d/i.test(claimNoRange);
 
-    if (hasNormalizedAtomicFragment && isPriceClaim) {
-      // Hilangkan nominal harga agar tidak ikut dihitung sebagai fakta lain.
-      const claimWithoutPrice = claimNoRange
-        .replace(/\brp\.?\s*\d+(?:[.,]\d{3})*(?:[.,]\d+)?/gi, ' ');
+    
+    if (hasNormalizedVariantConfig && isPriceClaim) {
+      // Hapus nominal harga dan konfigurasi varian dari klaim asli.
+      // Jangan gunakan claimNoRange di sini karena fragmen lain seperti
+      // durasi jam-menit mungkin sudah dinormalisasi oleh N2.
+      const claimWithoutPrice = claimForVariantPriceCheck
+        .replace(
+          /\brp\.?\s*\d+(?:[.,]\d{3})*(?:[.,]\d+)?/gi,
+          ' '
+        );
 
-      // Periksa apakah masih ada fakta ukur independen di luar
-      // identitas konfigurasi yang sudah diganti placeholder.
+      // Fakta ukur independen di luar identitas konfigurasi varian
+      // tetap membuat klaim menjadi compound HIGH.
       const hasOtherMeasuredFact =
         /\b\d+(?:[.,]\d+)?\s*(?:meter|menit|jam|detik|mm|nm|gb|mb|tb|mah|mp|fps|ghz|mhz|khz|hz|watt|nits|inci|cm|derajat(?:\s+celsius)?|%|persen)\b/i.test(
           claimWithoutPrice
@@ -326,7 +414,8 @@ export const AtomicityValidator = {
           pass: false,
           status: 'SUSPECT',
           rule: 'ATOMICITY',
-          reason: 'Price claim memuat fakta pengukuran independen di luar identitas varian',
+          reason:
+            'Price claim memuat fakta pengukuran independen di luar identitas varian',
           severity: 'HIGH'
         };
       }
@@ -335,10 +424,12 @@ export const AtomicityValidator = {
         pass: true,
         status: 'SUSPECT',
         rule: 'ATOMICITY',
-        reason: 'Price claim dengan identifikasi varian — satu proposisi harga',
+        reason:
+          'Price claim dengan identifikasi varian — satu proposisi harga',
         severity: 'MEDIUM'
       };
     }
+
 
     // ============================================================
     // Fakta ukur independen di luar fragmen atomic tetap HIGH.
@@ -477,6 +568,32 @@ export const AtomicityValidator = {
         ) || /\b\d+\b/.test(claimWithoutCompoundDescriptors) || rangeCount > 0;
 
       if (hasNumberOrUnitForConj) {
+        // N04: Identitas chipset + satu fakta spesifikasi independen
+        // merupakan dua fakta berbeda, meskipun hanya ada satu angka
+        // pengukuran setelah angka model chipset dinormalisasi.
+        const hasChipsetIdentity =
+          /\b(?:snapdragon|exynos|dimensity|helio)\s+[a-z]?\d+(?:\s+gen\s+\d+)?\b/i.test(
+            claimForAtomicity
+          );
+
+        const hasIndependentMeasuredValue =
+          /\b\d+(?:[.,]\d+)?\s*(?:meter|menit|jam|detik|mm|nm|gb|mb|kali|tahun|fps|mp|ghz|mhz|khz|watt|mah|hz|derajat\s+celsius|ribu|juta|%)\b/i.test(
+            claimWithoutCompoundDescriptors
+          ) ||
+          /\b\d+(?:[.,]\d+)?\s*°\s*c\b/i.test(
+            claimWithoutCompoundDescriptors
+          );
+
+         if (hasChipsetIdentity && hasIndependentMeasuredValue) {
+           return {
+             pass: false,
+             status: 'SUSPECT',
+             rule: 'ATOMICITY',
+             reason:
+              'Identitas chipset dan fakta spesifikasi terukur merupakan dua fakta independen',
+             severity: 'HIGH'
+          };
+        }
         const numberMatches =
           claimForConjunctionNumberCount
             .replace(compoundDescriptorPattern, '')
@@ -527,7 +644,7 @@ export const AtomicityValidator = {
     const hasAdversativeConjunction =
       /\b(?:tetapi|namun|akan tetapi|sedangkan)\b/i.test(normalizedClaim);
     const isCorrectiveContrast =
-      /\b(?:bukan|tidak hanya|tak hanya)\\b[^.!?]*\\b(?:tetapi|namun|melainkan)\\b/i.test(normalizedClaim);
+      /\b(?:bukan|tidak hanya|tak hanya)\b[^.!?]*\b(?:tetapi|namun|melainkan)\b/i.test(normalizedClaim);
 
     if (hasAdversativeConjunction && !isCorrectiveContrast) {
       return {
