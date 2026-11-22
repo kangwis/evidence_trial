@@ -51,7 +51,8 @@ import type { SRTSegment } from './src/evidence/srt';
 import {
   buildChunkLocalKeys,
   remapRelatedIds,
-  redirectRelatedIds
+  redirectRelatedIds,
+  pruneDanglingRelatedIds
 } from './src/evidence/related-ids';
 import type { LocalKey, ChunkKeyDiagnostics } from './src/evidence/related-ids';
 import { normalizeForSearch } from './src/evidence/srt';
@@ -581,8 +582,13 @@ async function extractEvidence(
 
       // Nomor lokal LLM dihitung dari SEMUA item hasil parse, sebelum filter
       // struktural/validator, karena LLM menomori urutan keluarannya sendiri.
+      // Metadata ID (model vs auto-fill) diteruskan untuk diagnosis collision.
       const { keys: chunkKeys, diagnostics: chunkKeyDiag } =
-        buildChunkLocalKeys(chunkEvidence as any[], chunkIndex);
+        buildChunkLocalKeys(
+          chunkEvidence as any[],
+          chunkIndex,
+          parsedResult.idMetadata
+        );
       chunkKeyDiagnostics.push(chunkKeyDiag);
       console.log(
 
@@ -595,6 +601,14 @@ async function extractEvidence(
         console.warn(
           `⚠️ Chunk ${chunkIndex + 1}: nomor lokal memakai posisi (alasan: ${chunkKeyDiag.reason}, ` +
           `id hilang: ${chunkKeyDiag.missingIds}, id ganda: ${chunkKeyDiag.duplicateIds.join(',') || '-'})`
+        );
+      }
+            // Log berapa ID yang diisi parser (bukan dari model) — observability.
+      if (chunkKeyDiag.autoFilledCount > 0) {
+        console.warn(
+          `⚠️ Chunk ${chunkIndex + 1}: ${chunkKeyDiag.autoFilledCount}/` +
+          `${chunkKeyDiag.totalParsed} evidence tanpa evidence_id dari model ` +
+          `(di-auto-fill dengan posisi).`
         );
       }
       const keyByEv = new Map<unknown, LocalKey>();
@@ -886,6 +900,23 @@ async function extractEvidence(
       `dipindahkan ke quarantine (source_coordinates ada tapi timestamp ` +
       `tidak konsisten dengan SRT).`
     );
+  }
+
+    // ── Bersihkan referensi menggantung setelah timestamp gate ──
+  // Evidence yang masuk quarantine karena timestamp sudah keluar dari
+  // finalEvidence, tetapi evidence lain mungkin masih merujuknya.
+  // Hanya referensi yang dibuang; evidence perujuk TIDAK dikarantina.
+  // splice dipakai agar variabel finalEvidence yang dipakai hilir
+  // (autoFill, RelationValidator) tidak perlu diganti.
+  {
+    const pruned = pruneDanglingRelatedIds(finalEvidence);
+    if (pruned.dropped > 0) {
+      console.log(
+        `🔗 ${pruned.dropped} referensi related_evidence_ids ke evidence yang ` +
+        `tidak ada di hasil akhir dibuang (timestamp gate).`
+      );
+      finalEvidence.splice(0, finalEvidence.length, ...pruned.evidence);
+    }
   }
 
   // ── Relation auto-fill (post-process, lintas-chunk) ────────
@@ -1396,10 +1427,17 @@ export function resolveDuplicateActions(
     // mengisi keptId untuk KEEP_BEST/KEEP_FIRST, ini akan error keras
     // alih-alih diam-diam salah pilih A.
     if (resolution.action === 'KEEP_BEST' || resolution.action === 'KEEP_FIRST') {
-      if (!resolution.keptId) {
+      if (
+        !resolution.keptId ||
+        (
+          resolution.keptId !== resolution.evidence_id_a &&
+          resolution.keptId !== resolution.evidence_id_b
+        )
+      ) {
         console.warn(
-          `⚠️ Resolution ${resolution.action} tanpa keptId untuk ` +
-          `${resolution.evidence_id_a}/${resolution.evidence_id_b}, dilewati (PRESERVE fallback).`
+          `⚠️ Resolution ${resolution.action} dengan keptId tidak valid untuk ` +
+          `${resolution.evidence_id_a}/${resolution.evidence_id_b}: ` +
+          `${resolution.keptId ?? '-'}, dilewati (PRESERVE fallback).`
         );
         continue;
       }
