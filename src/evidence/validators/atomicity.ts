@@ -77,9 +77,54 @@ const ADJECTIVE_PAIR_RE = new RegExp(
   'i'
 );
 
+// Kondisi/protokol uji yang menyertai SATU hasil ukur. Hanya dibuang untuk
+// pemeriksaan multi-value, dan hanya pada klaim yang diawali metrik hasil uji.
+// Klaim lain ("kedalaman 1 meter selama 30 menit") tidak tersentuh.
+const MEASUREMENT_SUBJECT_RE =
+  /^\s*(?:baterai|suhu|temperatur|frame\s+rate|streaming|pemutaran|proses|daya\s+tahan|ketahanan)\b/;
+
+const TEST_CONDITION_PHRASES: RegExp[] = [
+  /\b(?:selama|durasi)\s+(?:\d+(?:[.,]\d+)?|setengah|satu)\s*(?:menit|jam|detik)\b/g,
+  /\b(?:pada|di)\s+mode\s+\d+\s*hz\b/g,
+  /\bpreset\s+(?:[a-z]+\s+){0,2}\d+\s*fps\b/g
+];
+
+// Keluarga G: satu metrik berubah dari nilai lama ke nilai baru, dengan
+// susunan yang tidak dicakup P2. Satuan kedua angka WAJIB sama (backreference),
+// sehingga dua metrik berbeda tidak bisa terbaca sebagai satu perubahan.
+const G_NUM = String.raw`\d+(?:\.\d+)?`;
+const G_CHG =
+  String.raw`(?:turun|diturunkan|menurun|naik|dinaikkan|meningkat|berkurang|bertambah|berubah)`;
+const G_UNIT = 'mp|mah|gb|mb|hz|fps|watt|jam|menit|inci|%|persen|juta|ribu';
+
+const VALUE_CHANGE_PATTERNS: RegExp[] = [
+  // "turun menjadi 5 MP dari sebelumnya 8 MP"
+  new RegExp(
+    String.raw`\b${G_CHG}\b[^.!?]{0,20}?\b(?:menjadi|jadi|ke)\s+${G_NUM}\s*(${G_UNIT})(?![a-z0-9])\s+dari\s+(?:sebelumnya\s+)?${G_NUM}\s*\1(?![a-z0-9])`,
+    'i'
+  ),
+  // "naik dari 17 jam di A26 menjadi 23 jam di A27"
+  new RegExp(
+    String.raw`\b${G_CHG}\b[^.!?]{0,30}?\bdari\s+(?:sebelumnya\s+)?${G_NUM}\s*(${G_UNIT})(?![a-z])[^.!?]{0,25}?\b(?:menjadi|jadi|ke)\s+${G_NUM}\s*\1(?![a-z0-9])`,
+    'i'
+  ),
+  // "turun dari 8 ke 5 MP" (satuan hanya di angka kedua, angka bersebelahan)
+  new RegExp(
+    String.raw`\b${G_CHG}\b[^.!?]{0,30}?\bdari\s+(?:sebelumnya\s+)?${G_NUM}\s+(?:menjadi|jadi|ke)\s+${G_NUM}\s*(?:${G_UNIT})(?![a-z0-9])`,
+    'i'
+  )
+];
+
 export const AtomicityValidator = {
   validate(claim: string | undefined): ValidationResult {
-    const normalizedClaim = (claim || '').toLowerCase();
+  // Koma desimal Indonesia ("7,7 mm", "90,7%") bukan pemisah daftar.
+  // Dinormalisasi ke titik SEBELUM semua pemeriksaan koma (commaCount,
+  // commaList3PlusPattern). Hanya koma yang diapit digit; koma pemisah
+  // biasa (", ") tidak tersentuh. Semua regex angka di file ini sudah
+  // menerima [.,], jadi perilaku deteksi nilai tidak berubah.
+  const normalizedClaim = (claim || '')
+    .toLowerCase()
+    .replace(/(?<=\d),(?=\d)/g, '.');
 
     // ------------------------------------------------------------
     // 1. WHITELIST — klaim atomic yang sah memakai konjungsi
@@ -200,7 +245,7 @@ export const AtomicityValidator = {
         String.raw`(?:\s+(?:wi-?fi(?:\s+only)?|lte|[345]g))*`;
 
       const directVariantPrefix = new RegExp(
-        String.raw`\b(?:(?:tersedia\s+dalam\s+)?varian|opsi)${networkQualifier}\s*$`,
+        String.raw`\b(?:(?:tersedia\s+dalam\s+)?varian|opsi)${networkQualifier}(?:\s+dengan)?\s*$`,
         'i'
       );
 
@@ -229,12 +274,12 @@ export const AtomicityValidator = {
       // RAM -> label penyimpanan:
       // "varian RAM 8 GB dan ROM 128 GB"
       // "RAM 8 GB memiliki internal 128 GB"
-      /\bram\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi))){0,8}\s+\b(?:rom|storage|penyimpan(?:an)?(?:\s+internal)?|memori(?:\s+internal)?|internal(?:\s+penyimpanan)?)\s+\d+(?:[.,]\d+)?\s*gb\b/i,
+      /\bram\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi|opsi))){0,8}\s+\b(?:rom|storage|penyimpan(?:an)?(?:\s+internal)?|memori(?:\s+internal)?|internal(?:\s+penyimpanan)?)\s+\d+(?:[.,]\d+)?\s*gb\b/i,
 
       // Label penyimpanan -> RAM:
       // "varian penyimpanan 128 GB dibekali RAM 6 GB"
       // "varian ROM 128 GB dan RAM 8 GB"
-      /\b(?:rom|storage|penyimpan(?:an)?(?:\s+internal)?|memori(?:\s+internal)?|internal(?:\s+penyimpanan)?)\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi))){0,8}\s+\bram\s+\d+(?:[.,]\d+)?\s*gb\b/i,
+      /\b(?:rom|storage|penyimpan(?:an)?(?:\s+internal)?|memori(?:\s+internal)?|internal(?:\s+penyimpanan)?)\s+\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi|opsi))){0,8}\s+\bram\s+\d+(?:[.,]\d+)?\s*gb\b/i,
 
       // Varian RAM dengan notasi slash:
       // "varian RAM 4 GB / 64 GB"
@@ -243,11 +288,14 @@ export const AtomicityValidator = {
       // Varian kapasitas tanpa label penyimpanan:
       // "varian 128 GB memiliki RAM 8 GB"
       // "varian 256 GB dibekali RAM 8 GB"
-      /\b\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi))){0,8}\s+\bram\s+\d+(?:[.,]\d+)?\s*gb\b/i,
+      /\b\d+(?:[.,]\d+)?\s*gb\b(?:\s+(?:(?:memiliki|dan|serta|dengan|tersedia|dalam|varian|kapasitas|sebesar|yaitu|adalah|untuk|dibekali|dilengkapi|opsi))){0,8}\s+\bram\s+\d+(?:[.,]\d+)?\s*gb\b/i,
 
       // Notasi ringkas:
       // "varian 4 GB / 64 GB"
-      /\b\d+(?:[.,]\d+)?\s*gb\s*\/\s*\d+(?:[.,]\d+)?\s*gb\b/i
+      /\b\d+(?:[.,]\d+)?\s*gb\s*\/\s*\d+(?:[.,]\d+)?\s*gb\b/i,
+
+      // Susunan angka-dulu: "varian 4 GB RAM / 64 GB penyimpanan internal"
+      /\b\d+(?:[.,]\d+)?\s*gb\s+ram\s*\/\s*\d+(?:[.,]\d+)?\s*gb(?:\s+(?:penyimpan(?:an)?(?:\s+internal)?|internal|rom|storage|memori(?:\s+internal)?))?/i
     ];
 
     for (const pattern of variantConfigPatterns) {
@@ -281,6 +329,17 @@ export const AtomicityValidator = {
     normalizeAtomicFragment(
       /\b(?:resolusi(?:\s+kamera)?|kapasitas\s+baterai|harga(?:\s+promo)?)\b[^.!?]{0,60}?\b(?:berubah|meningkat|menurun|turun|naik|bertambah|berkurang)\b[^.!?]{0,40}?\bdari\s+(?:rp\s*)?\d+(?:[.,]\d+)?\s*(?:mp|mah|gb|mb|hz|fps|watt|%|persen)?\s+menjadi\s+(?:rp\s*)?\d+(?:[.,]\d+)?\s*(?:mp|mah|gb|mb|hz|fps|watt|%|persen)?/i
     );
+
+    // G: perubahan nilai lama→baru dengan susunan lain. Hanya dicoba bila
+    // belum ada fragmen atomic yang dinormalisasi, dan berhenti setelah
+    // fragmen pertama yang cocok, supaya perubahan metrik kedua yang
+    // independen tetap terdeteksi.
+    if (!hasNormalizedAtomicFragment) {
+      for (const pattern of VALUE_CHANGE_PATTERNS) {
+        normalizeAtomicFragment(pattern);
+        if (hasNormalizedAtomicFragment) break;
+      }
+    }
 
     // N2: durasi jam-menit adalah satu nilai komposit.
     normalizeAtomicFragment(
@@ -321,6 +380,7 @@ export const AtomicityValidator = {
     const claimForConjunction = claimForAtomicity
       .replace(fractionPairPattern, ' ')
       .replace(/\b[a-z]*\d+\s+plus\b/gi, ' [model_plus] ')   // "A11 Plus", "Note 20 Plus"
+      .replace(/\bram\s+plus\b/gi, ' [feature_ram_plus] ')    // fitur Samsung "RAM Plus"
       .replace(/\b\d+g\b/gi, ' [network_generation] ')        // "5G", "4G"
       .replace(/\blte\b/gi, ' [network_lte] ')                // "LTE"
       .replace(/\bwi-?fi(?:\s+only)?\b/gi, ' [wifi_variant] ') // "Wi-Fi Only"
@@ -378,7 +438,14 @@ export const AtomicityValidator = {
     const commaList3PlusPattern =
       /,[^,]{1,80},\s*(dan|serta|plus|kemudian)\b/i;
 
-    const hasMultiValue = multiValuePattern.test(claimNoRange);
+        const claimForMultiValue = MEASUREMENT_SUBJECT_RE.test(claimNoRange)
+      ? TEST_CONDITION_PHRASES.reduce(
+          (t, re) => t.replace(re, ' kondisi_uji '),
+          claimNoRange
+        )
+      : claimNoRange;
+
+    const hasMultiValue = multiValuePattern.test(claimForMultiValue);
     const hasCommaList3Plus = commaList3PlusPattern.test(claimNoRange);
 
     // ============================================================
