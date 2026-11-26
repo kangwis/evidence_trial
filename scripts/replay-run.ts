@@ -84,6 +84,7 @@ import type { SRTSegment } from '../src/evidence/srt';
 import { collectAmbiguous, printAmbiguousReport } from './ambiguous-report';
 import type { DuplicateResult } from '../src/evidence/validators/duplicate';
 import type { EvidenceContext, EvidenceItem } from '../src/evidence/types';
+import { MAX_VALIDATION_SPAN } from '../src/evidence/search';
 
 const RULES_VERSION: string =
   (assessmentModule as unknown as { ASSESSMENT_RULES_VERSION?: string }).ASSESSMENT_RULES_VERSION ?? 'legacy';
@@ -120,7 +121,8 @@ interface RunRecord {
 type Outcome = 'diterima' | 'diterima+flag' | 'karantina';
 
 // Hasil verifikasi rekonstruksi chunk terhadap record run asli.
-type ContextStatus = 'OK' | 'LEGACY_FORMAT' | 'BOUNDARY_DIFF' | 'CHARS_DIFF' | 'UNKNOWN';
+export type ContextStatus = 'OK' | 'LEGACY_FORMAT' | 'BOUNDARY_DIFF' | 'CHARS_DIFF' | 'UNKNOWN';
+export type RunTrust = 'VERIFIED' | 'UNVERIFIED';
 
 // BARU: klasifikasi jenis kegagalan GROUNDING/PROVENANCE.
 // Membedakan: melintasi SRT vs elipsis vs tidak ditemukan vs ambigu.
@@ -169,6 +171,7 @@ interface ChunkReplay {
   // Verifikasi rekonstruksi chunk terhadap run asli.
   ctx?: ContextStatus;
   ctxDetail?: string;
+  rawMissingUnexpected?: boolean;
 }
 
 interface ReplayResult {
@@ -183,6 +186,10 @@ interface ReplayResult {
   srtVerified?: boolean;
   // Hash ISI file SRT yang dibaca replay ini (bukan srt_sha tercatat).
   srtContentSha?: string;
+    // VERIFIED hanya jika SRT, konfigurasi chunk, jumlah chunk, dan konteks
+  // semua chunk cocok dengan run asli. Selain itu UNVERIFIED (hanya diagnosis).
+  trust: RunTrust;
+  trustReasons: string[];
   // Hanya diisi jika withDuplicates=true:
   acceptedForDedup?: EvidenceItem[];  // evidence dengan ID sintetis "c<chunk>:<pos>"
   duplicates?: DuplicateResult;
@@ -206,7 +213,7 @@ interface SavedRun {
 
 // Sinkron dengan maxSpan di provenance.ts / grounding.ts (Opsi A). Hanya
 // untuk teks diagnostik; bukan sumber kebenaran.
-const PROVENANCE_MAX_SPAN = 5;
+const PROVENANCE_MAX_SPAN = MAX_VALIDATION_SPAN;
 
 // Aturan --audit yang TIDAK dievaluasi replay: replayRun hanya menjalankan
 // EvidenceValidator.validate (5 aturan per-evidence). TimestampValidator dan
@@ -369,7 +376,7 @@ function diagnoseParseFailure(rawOutput: string): string[] {
 // ------------------------------------------------------------
 // Bandingkan chunk hasil rekonstruksi dengan record chunk run asli.
 // BOUNDARY_DIFF diprioritaskan di atas CHARS_DIFF.
-function verifyChunkContext(
+export function verifyChunkContext(
   orig: ChunkRecord | undefined,
   chunk: SRTSegment[]
 ): { status: ContextStatus; detail: string } {
@@ -390,13 +397,50 @@ function verifyChunkContext(
       detail: `segmen asli ${orig.segments[0]}..${orig.segments[1]} vs rekonstruksi ${first}..${last}`
     };
   }
+
   if (orig.chars !== chars) {
+    // Format lama: tanpa penanda "[N] " per segmen. Legacy hanya bila selisih
+    // PERSIS sama dengan total panjang penanda.
+    const markerChars = chunk.reduce((n, s) => n + String(s.index).length + 3, 0);
+    if (orig.chars === chars - markerChars) {
+      return {
+        status: 'LEGACY_FORMAT',
+        detail: `chars asli ${orig.chars} = rekonstruksi ${chars} dikurangi penanda [N] ${markerChars}`
+      };
+    }
     return {
       status: 'CHARS_DIFF',
       detail: `chars asli ${orig.chars} vs rekonstruksi ${chars} (selisih ${chars - orig.chars})`
     };
   }
-  return { status: 'OK', detail: '' };
+
+  return { status: 'OK', detail: 'batas segmen dan jumlah karakter cocok' };
+}
+
+export function computeRunTrust(input: {
+  srtVerified: boolean | undefined;
+  hasChunkConfig: boolean;
+  reconstructedChunkCount: number;
+  recordedChunkCount: number;
+  chunkCtx: Array<{ chunk: number; ctx?: ContextStatus; rawMissingUnexpected?: boolean }>;
+}): { trust: RunTrust; reasons: string[] } {
+  const reasons: string[] = [];
+  if (input.srtVerified !== true) reasons.push('isi SRT tidak terverifikasi terhadap srt_sha');
+  if (!input.hasChunkConfig) {
+    reasons.push('chunk_chars/chunk_overlap tidak tercatat; fallback 4000/2 hanya asumsi');
+  }
+  if (input.reconstructedChunkCount !== input.recordedChunkCount) {
+    reasons.push(
+      `jumlah chunk rekonstruksi ${input.reconstructedChunkCount} != run asli ${input.recordedChunkCount}`
+    );
+  }
+  for (const c of input.chunkCtx) {
+    if (c.ctx !== 'OK' && c.ctx !== 'LEGACY_FORMAT') {
+      reasons.push(`chunk ${c.chunk}: ctx=${c.ctx ?? '-'}`);
+    }
+    if (c.rawMissingUnexpected) reasons.push(`chunk ${c.chunk}: raw hilang`);
+  }
+  return { trust: reasons.length ? 'UNVERIFIED' : 'VERIFIED', reasons };
 }
 
 function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResult {
@@ -415,7 +459,11 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
   const srtPath = path.join(RUN_LOG_DIR, '_srt', `${run.srt_sha}.srt`);
   if (!fs.existsSync(srtPath)) {
     notes.push(`SRT tidak ditemukan: ${srtPath}`);
-    return { run, chunks, items, notes, rawSha: '-' };
+    return {
+      run, chunks, items, notes, rawSha: '-',
+      trust: 'UNVERIFIED',
+      trustReasons: ['SRT tidak ditemukan']
+    };
   }
 
   const srtText = fs.readFileSync(srtPath, 'utf8');
@@ -427,10 +475,11 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
     );
   }
   const segments = parseSRT(srtText);
+  const hasChunkConfig = run.chunk_chars != null && run.chunk_overlap != null;
   const evChunks = buildEvidenceChunks(
     segments,
-    run.chunk_chars ?? 18000,
-    run.chunk_overlap ?? 3
+    run.chunk_chars ?? 4000,
+    run.chunk_overlap ?? 2
   );
   if (evChunks.length !== run.chunks.length) {
     notes.push(
@@ -445,12 +494,14 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
     const n = chunkIndex + 1;
     chunkSegmentsMap.set(n, chunk);
     const ctxCheck = verifyChunkContext(run.chunks.find(c => c.chunk === n), chunk);
-    const rawPath = path.join(RUN_LOG_DIR, run.run_id, `chunk-${n}.raw.txt`);
+        const rawPath = path.join(RUN_LOG_DIR, run.run_id, `chunk-${n}.raw.txt`);
+    const origRec = run.chunks.find(c => c.chunk === n);
     if (!fs.existsSync(rawPath)) {
       chunks.push({
         chunk: n, parsed: 0, structurallyInvalid: 0, accepted: 0, flagged: 0, quarantine: 0,
         parseStatus: '-', strategy: '-', note: 'raw tidak ada (chunk gagal di run asli?)',
-        ctx: ctxCheck.status, ctxDetail: ctxCheck.detail
+        ctx: ctxCheck.status, ctxDetail: ctxCheck.detail,
+        rawMissingUnexpected: origRec?.status !== 'FAILED'
       });
       return;
     }
@@ -556,12 +607,22 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
     duplicates = DuplicateValidator.detect(acceptedForDedup);
   }
 
-  return {
+  const { trust, reasons: trustReasons } = computeRunTrust({
+    srtVerified,
+    hasChunkConfig,
+    reconstructedChunkCount: evChunks.length,
+    recordedChunkCount: run.chunks.length,
+    chunkCtx: chunks.map(c => ({ chunk: c.chunk, ctx: c.ctx, rawMissingUnexpected: c.rawMissingUnexpected }))
+  });
+
+    return {
     run, chunks, items, notes,
     chunkSegments: chunkSegmentsMap,
     rawSha: rawHash.digest('hex').slice(0, 12),
     srtVerified,
     srtContentSha: shortHash(srtText),
+    trust,
+    trustReasons,
     acceptedForDedup: withDuplicates ? acceptedForDedup : undefined,
     duplicates
   };
@@ -991,6 +1052,13 @@ function printRun(res: ReplayResult, full: boolean, currentHash: string): void {
   );
   console.log(`  aturan assessment sekarang=${RULES_VERSION}  raw_sha=${res.rawSha}`);
   console.log(`  ${REPLAY_SCOPE_NOTE}`);
+  console.log(
+    `  TRUST: ${res.trust}` +
+    `${res.trustReasons.length ? ' — ' + res.trustReasons.join('; ') : ''}`
+  );
+  if (res.trust === 'UNVERIFIED') {
+    console.log('  !! Hasil replay ini HANYA untuk diagnosis, bukan perbandingan yang bisa dipercaya.');
+  }
   for (const n of notes) console.log(`  ! ${n}`);
 
   console.log(`  ${pad('chunk', 6)}${pad('parsed', 8)}${pad('accept', 8)}${pad('quar', 6)}${pad('parse', 22)}| asli: parsed/accept/quar -> parity`);
@@ -1070,26 +1138,40 @@ function printAllTable(results: ReplayResult[]): void {
     const tq = r.chunks.reduce((s, c) => s + c.quarantine, 0);
     const ta = r.chunks.reduce((s, c) => s + c.accepted, 0);
     const tf = r.chunks.reduce((s, c) => s + c.flagged, 0);
+    
     const rules = byRule(r.items);
-    for (const k of Object.keys(rules)) totalRules[k] = (totalRules[k] ?? 0) + rules[k];
-    const fl = flagsByRule(r.items);
-    for (const k of Object.keys(fl)) totalFlags[k] = (totalFlags[k] ?? 0) + fl[k];
-        // BARU: merge breakdown run ini ke agregat.
-    for (const [ruleName, bucket] of breakdownByRuleAndKind(r.items)) {
-      let agg = totalBreakdown.get(ruleName);
-      if (!agg) {
-        agg = {
-          MULTI_SRT: 0, ELLIPSIS: 0, NOT_FOUND: 0,
-          AMBIGUOUS: 0, MISSING_MEANINGFUL: 0, OTHER: 0
-        };
-        totalBreakdown.set(ruleName, agg);
+
+    if (r.trust === 'VERIFIED') {
+      for (const k of Object.keys(rules)) {
+        totalRules[k] = (totalRules[k] ?? 0) + rules[k];
       }
-      mergeBreakdown(agg, bucket);
+
+      const fl = flagsByRule(r.items);
+      for (const k of Object.keys(fl)) {
+        totalFlags[k] = (totalFlags[k] ?? 0) + fl[k];
+      }
+
+      for (const [ruleName, bucket] of breakdownByRuleAndKind(r.items)) {
+        let agg = totalBreakdown.get(ruleName);
+        if (!agg) {
+          agg = {
+            MULTI_SRT: 0,
+            ELLIPSIS: 0,
+            NOT_FOUND: 0,
+            AMBIGUOUS: 0,
+            MISSING_MEANINGFUL: 0,
+            OTHER: 0
+          };
+          totalBreakdown.set(ruleName, agg);
+        }
+        mergeBreakdown(agg, bucket);
+      }
     }
     console.log(
       `${pad(r.run.run_id.slice(0, 19), 21)}${pad(String(r.run.review_id ?? '-').slice(0, 11), 13)}` +
       `${pad(tp, 8)}${pad(ta, 8)}${pad(tf, 6)}${pad(tq, 6)}${pad(tp ? ((tq / tp) * 100).toFixed(1) + '%' : '-', 8)}` +
-      `${pad(r.chunks.filter(c => c.parseStatus === 'FAILED').length + '/' + r.chunks.length, 12)}${fmtRules(rules)}`
+      `${pad(r.chunks.filter(c => c.parseStatus === 'FAILED').length + '/' + r.chunks.length, 12)}${fmtRules(rules)}` +
+      (r.trust === 'VERIFIED' ? '' : '  [UNVERIFIED]')
     );
   }
   const srtMismatch = results.filter(r => r.srtVerified === false);
@@ -1117,16 +1199,27 @@ function printAllTable(results: ReplayResult[]): void {
       console.log(`  - ${r.run.run_id}  BOUNDARY_DIFF=${b}  CHARS_DIFF=${d}  (dari ${r.chunks.length} chunk)`);
     }
   }
+  
   const ctxLegacy = results.filter(r => r.chunks.some(c => c.ctx === 'LEGACY_FORMAT')).length;
   if (ctxLegacy > 0) {
     console.log(
-      `Catatan: ${ctxLegacy} run memakai format teks chunk lama (tanpa penanda [N]); ` +
-      `batas segmen cocok, panjang cocok dengan format lama (kemungkinan bukan edit SRT).`
+      `Catatan: ${ctxLegacy} run memakai format chunk lama (tanpa penanda [N]); ` +
+      `selisih chars terbukti sama dengan total panjang penanda. Validasi tidak terpengaruh ` +
+      `(validator memakai chunkSegments).`
     );
   }
+
   const ctxUnknown = results.filter(r => r.chunks.some(c => c.ctx === 'UNKNOWN')).length;
   if (ctxUnknown > 0) {
     console.log(`Catatan: ${ctxUnknown} run punya chunk dengan verifikasi konteks UNKNOWN (segments/chars tidak tercatat).`);
+  }
+  const unverified = results.filter(r => r.trust !== 'VERIFIED');
+  console.log(
+    `Agregat di bawah HANYA dari ${results.length - unverified.length} run VERIFIED` +
+    `${unverified.length ? `; ${unverified.length} run UNVERIFIED dikeluarkan` : ''}.`
+  );
+  for (const r of unverified) {
+    console.log(`  - ${r.run.run_id}: ${r.trustReasons.join('; ')}`);
   }
   console.log(`Total karantina per aturan: ${fmtRules(totalRules)}`);
   console.log(`Total diterima dengan flag per aturan: ${fmtRules(totalFlags)}`);
@@ -1518,4 +1611,4 @@ function main(): void {
   }
 }
 
-main();
+if (!process.env.VITEST) main();
