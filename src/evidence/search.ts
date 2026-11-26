@@ -6,13 +6,13 @@
 //
 // CHANGELOG:
 //   - findSourceMatches: default maxSpan berubah dari 6 (multi-SRT)
-//     menjadi 1 (single-SRT), sesuai prompt rule 8:
+//     menjadi Default = MAX_VALIDATION_SPAN (3), sesuai prompt rule 8:
 //     "source_excerpt WAJIB berada dalam SATU subtitle SRT utuh."
 //   - Multi-span (2..MAX_DIAGNOSTIC_SPAN) tetap didukung sebagai
 //     opsi diagnostik (maxSpan >= 2), TIDAK dipakai di jalur
 //     validasi. Dipakai oleh Grounding/Provenance untuk memberi
 //     reason FAIL yang lebih informatif saat excerpt melintasi
-//     >1 SRT.
+//     Default = MAX_VALIDATION_SPAN (3) SRT.
 //   - Tambah helper excerptSpansMultipleSegments().
 // ============================================================
 
@@ -34,11 +34,17 @@ export function excerptContainsEllipsis(excerpt: string | null | undefined): boo
   return /\.{3,}|…/.test(excerpt || '');
 }
 
-// ------------------------------------------------------------
-// MAX_DIAGNOSTIC_SPAN — batas atas span untuk pencarian diagnostik.
-// Nilai historis: 6 (span window pada versi lama). Tidak dipakai
-// di jalur validasi; hanya untuk reason FAIL.
-// ------------------------------------------------------------
+/**
+ * Batas span yang diizinkan prompt Rule 8 (maks 3 segmen berurutan).
+ * Dipakai oleh SEMUA jalur validasi: Grounding, Provenance, resolver anchor,
+ * dan quasi-literal. Jangan memakai MAX_DIAGNOSTIC_SPAN untuk menerima evidence.
+ */
+export const MAX_VALIDATION_SPAN = 3;
+
+/**
+ * Batas lebih besar HANYA untuk diagnosis alasan FAIL
+ * (excerptSpansMultipleSegments). Bukan batas penerimaan.
+ */
 export const MAX_DIAGNOSTIC_SPAN = 6;
 
 // ------------------------------------------------------------
@@ -61,7 +67,7 @@ export function stripSegmentMarkers(text: string | null | undefined): string {
  * @param sourceExcerpt   Excerpt literal yang dicari.
  * @param context         EvidenceContext (chunk + segmen SRT).
  * @param options.maxSpan Span maksimum dalam satuan segmen SRT.
- *                        Default 1 — sesuai prompt rule 8:
+ *                        Default = MAX_VALIDATION_SPAN (3) — sesuai prompt rule 8:
  *                        "source_excerpt WAJIB berada dalam SATU
  *                        subtitle SRT utuh."
  *
@@ -75,9 +81,8 @@ export function findSourceMatches(
   context: EvidenceContext,
   options: { maxSpan?: number } = {}
 ): SegmentMatch[] {
-  const maxSpan = Math.max(1, options.maxSpan ?? 5);
-  // BARU: strip penanda [N] sebelum normalize.
-  const excerpt = normalizeForSearch(stripSegmentMarkers(sourceExcerpt)); 
+  const maxSpan = Math.max(1, options.maxSpan ?? MAX_VALIDATION_SPAN);
+  const excerpt = normalizeForSearch(stripSegmentMarkers(sourceExcerpt));
 
   if (!excerpt) {
     return [];
@@ -96,40 +101,10 @@ export function findSourceMatches(
     }
   }
 
-  if (maxSpan < 2) {
-    return dedupMatches(matches);
-  }
-
-  // 2. Span = 2 (diagnostik)
-  for (let i = 0; i < context.chunkSegments.length - 1; i++) {
-    const combined = normalizeForSearch(
-      context.chunkSegments[i].text + ' ' +
-      context.chunkSegments[i + 1].text
-    );
-
-    if (combined.includes(excerpt)) {
-      const seg1 = normalizeForSearch(context.chunkSegments[i].text);
-      const seg2 = normalizeForSearch(context.chunkSegments[i + 1].text);
-
-      const isEntirelyInSeg1 = seg1.includes(excerpt);
-      const isEntirelyInSeg2 = seg2.includes(excerpt);
-
-      if (!isEntirelyInSeg1 && !isEntirelyInSeg2) {
-        matches.push({
-          segmentStartIndex: context.chunkSegments[i].index,
-          segmentEndIndex: context.chunkSegments[i + 1].index
-        });
-      }
-    }
-  }
-
-  if (maxSpan < 5) {
-    return dedupMatches(matches);
-  }
-
-  // 3. Span = 5..maxSpan (diagnostik)
+  // 2. Span = 2..maxSpan. Semua span dicari tanpa lompatan
+  //    (sebelumnya span 3 dan 4 terlewat karena loop langsung mulai dari 5).
   const upper = Math.min(maxSpan, MAX_DIAGNOSTIC_SPAN);
-  for (let span = 5; span <= upper; span++) {
+  for (let span = 2; span <= upper; span++) {
     for (let i = 0; i + span <= context.chunkSegments.length; i++) {
       const window = context.chunkSegments.slice(i, i + span);
       const combined = normalizeForSearch(
@@ -138,7 +113,7 @@ export function findSourceMatches(
 
       if (!combined.includes(excerpt)) continue;
 
-      // Skip if fully contained in any smaller sub-span (already found)
+      // Lewati bila excerpt sudah utuh di salah satu sub-span yang lebih kecil
       let containedInSmaller = false;
       for (let sub = 1; sub < span; sub++) {
         for (let j = 0; j + sub <= window.length; j++) {
@@ -207,7 +182,7 @@ export function excerptSpansMultipleSegments(
 // Return null bila:
 //   - excerpt terlalu pendek (<2 kata bermakna), ATAU
 //   - ada kata bermakna excerpt yang hilang dari chunk, ATAU
-//   - span melebihi maxSpan (default 5, sesuai Opsi A).
+//   - span melebihi maxSpan (default MAX_VALIDATION_SPAN).
 //
 // Return { matchKind, coverage, ... } bila lolos.
 // ------------------------------------------------------------
@@ -224,7 +199,7 @@ export function findSourceMatchesQuasi(
   context: EvidenceContext,
   options: { maxSpan?: number } = {}
 ): QuasiMatchInfo | null {
-  const maxSpan = Math.max(1, options.maxSpan ?? 5);
+  const maxSpan = Math.max(1, options.maxSpan ?? MAX_VALIDATION_SPAN);
   const stripped = stripSegmentMarkers(sourceExcerpt);
   if (!stripped) return null;
 
