@@ -25,6 +25,7 @@ import type {
   ValidationResult
 } from '../types';
 import {
+  MAX_VALIDATION_SPAN,
   findSourceMatches,
   findSourceMatchesQuasi,
   diagnoseQuasiLiteralFailure,
@@ -38,8 +39,10 @@ export const GroundingValidator = {
     sourceExcerpt: string | null | undefined,
     context: EvidenceContext
   ): ValidationResult {
-    // --- Tier 1: exact substring match (Opsi A, maxSpan=5) ---
-    const matches = findSourceMatches(sourceExcerpt, context, { maxSpan: 5 });
+    // --- Tier 1: exact substring match (maks MAX_VALIDATION_SPAN segmen) ---
+    const matches = findSourceMatches(sourceExcerpt, context, {
+      maxSpan: MAX_VALIDATION_SPAN
+    });
 
     if (matches.length > 0) {
       return {
@@ -51,7 +54,9 @@ export const GroundingValidator = {
     }
 
     // --- Tier 2: quasi-literal (kata bermakna + urutan asli) ---
-    const quasi = findSourceMatchesQuasi(sourceExcerpt, context, { maxSpan: 5 });
+    const quasi = findSourceMatchesQuasi(sourceExcerpt, context, {
+      maxSpan: MAX_VALIDATION_SPAN
+    });
     if (quasi) {
       return {
         pass: true,
@@ -68,14 +73,14 @@ export const GroundingValidator = {
 
     // Tier 2 gagal. Cek apakah gagal karena span terlalu besar.
     const quasiRaw = matchQuasiLiteralInSegments(stripSegmentMarkers(sourceExcerpt), context.chunkSegments);
-    if (quasiRaw.matches && quasiRaw.spanInSegments > 5) {
-      return {
-        pass: false, status: 'FAIL', severity: 'CRITICAL', rule: 'GROUNDING',
-        reason:
+    if (quasiRaw.matches && quasiRaw.spanInSegments > MAX_VALIDATION_SPAN) {
+       return {
+         pass: false, status: 'FAIL', severity: 'CRITICAL', rule: 'GROUNDING',
+         reason:
           `Kata bermakna excerpt ada + urutan asli, tetapi melintasi ` +
-          `${quasiRaw.spanInSegments} segmen SRT (maksimum 5 menurut prompt rule 8).`
-      };
-    }
+          `${quasiRaw.spanInSegments} segmen SRT (maksimum ${MAX_VALIDATION_SPAN} menurut prompt rule 8).`
+       };
+     }
 
     // --- Tier 3: FAIL dengan reason diperkaya ---
     // Sebelum jatuh ke reason generik, cek apakah kita bisa menyebut
@@ -105,7 +110,8 @@ export const GroundingValidator = {
         status: 'FAIL',
         rule: 'GROUNDING',
         reason:
-          'source_excerpt hanya ditemukan saat melintasi lebih dari satu segmen SRT; prompt rule 8 mewajibkan excerpt berada dalam satu SRT utuh',
+          `source_excerpt hanya ditemukan saat melintasi lebih dari ${MAX_VALIDATION_SPAN} segmen SRT ` +
+          `(maksimum ${MAX_VALIDATION_SPAN} menurut prompt rule 8)`,
         severity: 'CRITICAL'
       };
     }
