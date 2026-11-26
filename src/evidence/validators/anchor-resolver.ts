@@ -87,7 +87,7 @@ import type {
   SourceCoordinates,
   SegmentMatch
 } from '../types';
-import { findSourceMatches } from '../search';
+import { MAX_VALIDATION_SPAN, findSourceMatches } from '../search';
 import { normalizeForSearch } from '../srt';
 
 export type ProvenanceResolutionStatus = 'RESOLVED' | 'AMBIGUOUS';
@@ -192,7 +192,9 @@ export function resolveProvenanceAnchor(
   anchor: string | null | undefined,
   context: EvidenceContext
 ): ProvenanceResolution {
-  const candidates = findSourceMatches(sourceExcerpt, context);
+  const candidates = findSourceMatches(sourceExcerpt, context, {
+    maxSpan: MAX_VALIDATION_SPAN
+  });
 
   // 0 match: bukan tanggung jawab resolver ini (Grounding sudah
   // FAIL sebelum resolver dipanggil). Defensif: AMBIGUOUS+null.
