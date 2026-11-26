@@ -3,7 +3,7 @@
 // ============================================================
 // Tanggung jawab:
 //   1. Existence (via findSourceMatches, maxSpan=5) → FAIL jika 0.
-//   2. Single-SRT: excerpt harus berada dalam maksimal 5 segmen.
+//   2. Single-SRT: excerpt harus berada dalam diperbarui ke 3.
 //   3. Quasi-literal fallback: bila exact gagal tapi kata bermakna
 //      + urutan asli terpenuhi → PASS + SUSPECT LOW + code QUASI_LITERAL.
 //   4. Occurrence disambiguation (exact match only) via
@@ -14,7 +14,7 @@
 // dibangun di sini dari sinyal existence.
 //
 // CHANGELOG (ronde terbaru):
-//   - OPSI A: maxSpan 1 → 5.
+//   - diperbarui ke 3.
 //   - Tier 2 quasi-literal ditambahkan. Koordinat diambil langsung
 //     dari span quasi-match (resolver TIDAK dipanggil karena
 //     resolver butuh exact match).
@@ -27,6 +27,7 @@ import type {
   ValidationResult
 } from '../types';
 import {
+  MAX_VALIDATION_SPAN,
   findSourceMatches,
   findSourceMatchesQuasi,
   diagnoseQuasiLiteralFailure,
@@ -47,11 +48,15 @@ export const ProvenanceValidator = {
     result: ValidationResult;
   } {
     // --- Tier 1: exact substring match (Opsi A, maxSpan=5) ---
-    const matches = findSourceMatches(sourceExcerpt, context, { maxSpan: 5 });
+    const matches = findSourceMatches(sourceExcerpt, context, {
+      maxSpan: MAX_VALIDATION_SPAN
+    });
 
     if (matches.length === 0) {
       // --- Tier 2: quasi-literal ---
-      const quasi = findSourceMatchesQuasi(sourceExcerpt, context, { maxSpan: 5 });
+      const quasi = findSourceMatchesQuasi(sourceExcerpt, context, {
+        maxSpan: MAX_VALIDATION_SPAN
+      });
       if (quasi) {
         // Quasi-literal: resolver anchor tidak bisa dipakai
         // (butuh exact match untuk disambiguasi). Koordinat diambil
@@ -85,7 +90,7 @@ export const ProvenanceValidator = {
         stripSegmentMarkers(sourceExcerpt),
         context.chunkSegments
       );
-      if (quasiRaw.matches && quasiRaw.spanInSegments > 5) {
+      if (quasiRaw.matches && quasiRaw.spanInSegments > MAX_VALIDATION_SPAN) {
         return {
           coordinates: null,
           result: {
@@ -95,7 +100,7 @@ export const ProvenanceValidator = {
             rule: 'PROVENANCE',
             reason:
               `Kata bermakna excerpt ada + urutan asli, tetapi melintasi ` +
-              `${quasiRaw.spanInSegments} segmen SRT (maksimum 5 menurut prompt rule 8).`
+              `${quasiRaw.spanInSegments} segmen SRT (maksimum ${MAX_VALIDATION_SPAN} menurut prompt rule 8).`
           }
         };
       }
@@ -130,7 +135,8 @@ export const ProvenanceValidator = {
             status: 'FAIL',
             rule: 'PROVENANCE',
             reason:
-              'source_excerpt hanya ditemukan saat melintasi lebih dari satu segmen SRT; prompt rule 8 mewajibkan excerpt berada dalam satu SRT utuh',
+              `source_excerpt hanya ditemukan saat melintasi lebih dari ${MAX_VALIDATION_SPAN} segmen SRT ` +
+              `(maksimum ${MAX_VALIDATION_SPAN} menurut prompt rule 8)`,
             severity: 'CRITICAL'
           }
         };
@@ -180,7 +186,7 @@ export const ProvenanceValidator = {
     }
 
     // --- RESOLVED (exact match, unambiguous) ---
-    // Koordinat multi-SRT (maxSpan=5) DIIZINKAN.
+    // (maxSpan=3).
     return {
       coordinates: resolution.coordinates,
       result: {
