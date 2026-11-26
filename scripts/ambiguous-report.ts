@@ -27,7 +27,7 @@
 // sesuaikan di sini.
 // ============================================================
 
-import { findSourceMatches } from '../src/evidence/search';
+import { MAX_VALIDATION_SPAN, findSourceMatches } from '../src/evidence/search';
 import { normalizeForSearch } from '../src/evidence/srt';
 import type { SRTSegment } from '../src/evidence/srt';
 import { ANCHOR_EXPANSION_RADIUS } from '../src/evidence/validators/anchor-resolver';
@@ -95,7 +95,7 @@ export function classifyAmbiguity(inp: AmbiguousInput): AmbiguityDiagnosis {
     chunkText: inp.segments.map(s => s.text).join(' '),
     chunkSegments: inp.segments
   };
-  const candidates = findSourceMatches(inp.excerpt, ctx);
+  const candidates = findSourceMatches(inp.excerpt, ctx, { maxSpan: MAX_VALIDATION_SPAN });
   const anchorNorm = normalizeForSearch(inp.subtopic || '');
   const done = (category: AmbiguityCategory, detail: string): AmbiguityDiagnosis =>
     ({ category, candidates, anchorNorm, detail });
