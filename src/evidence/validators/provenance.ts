@@ -36,13 +36,20 @@ import {
   stripSegmentMarkers
 } from '../search';
 import { resolveProvenanceAnchor } from './anchor-resolver';
+export { selectProductHint } from './anchor-resolver';
 import { matchQuasiLiteralInSegments } from '../text-matching';
+
+export interface ProvenanceResolverOptions {
+  /** Hint produk (dari claim/context) untuk fase 3 resolver. null → skip. */
+  productHint?: string | null;
+}
 
 export const ProvenanceValidator = {
   resolve(
     sourceExcerpt: string | null | undefined,
     anchor: string | null | undefined,
-    context: EvidenceContext
+    context: EvidenceContext,
+    options: ProvenanceResolverOptions = {}
   ): {
     coordinates: SourceCoordinates | null;
     result: ValidationResult;
@@ -163,7 +170,8 @@ export const ProvenanceValidator = {
     const resolution = resolveProvenanceAnchor(
       sourceExcerpt,
       anchor,
-      context
+      context,
+      { productHint: options.productHint }
     );
 
     if (resolution.status === 'AMBIGUOUS') {
@@ -187,6 +195,23 @@ export const ProvenanceValidator = {
 
     // --- RESOLVED (exact match, unambiguous) ---
     // (maxSpan=3).
+    // Resolusi lewat produk bergantung pada klaim model → SUSPECT LOW
+    // (non-blocking, tapi terhitung di accepted_flagged dan terlihat di replay).
+    if (resolution.via === 'product') {
+      return {
+        coordinates: resolution.coordinates,
+        result: {
+          pass: true,
+          status: 'SUSPECT',
+          rule: 'PROVENANCE',
+          severity: 'LOW',
+          code: 'PRODUCT_VETO',
+          reason:
+            'Occurrence ditentukan lewat produk pada klaim (anchor tidak diskriminatif); ' +
+            'koordinat bergantung pada klaim model.'
+        }
+      };
+    }
     return {
       coordinates: resolution.coordinates,
       result: {
