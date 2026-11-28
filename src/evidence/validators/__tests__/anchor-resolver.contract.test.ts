@@ -100,6 +100,7 @@
 import { describe, test, expect } from 'vitest';
 import { resolveProvenanceAnchor } from '../anchor-resolver';
 import type { EvidenceContext } from '../../types';
+import { findSourceMatches, MAX_VALIDATION_SPAN } from '../../search';
 
 // ------------------------------------------------------------
 // FIXTURE — verbatim dari transcript.srt asli, segmen 95-103
@@ -399,10 +400,182 @@ describe('anchor = nilai yang di-echo dari excerpt (pola produksi 871JKOxrsNM)',
     expect(r.coordinates).toBeNull();
   });
 
-  // Dipindah ke test biasa setelah resolver fase 3 (product-aware) ada.
-  test.fails('TARGET: klaim "Galaxy A18" harus resolve ke segmen 34', () => {
-    // butuh API baru, mis. resolveProvenanceAnchor(excerpt, anchor, ctx, { productHint: 'Galaxy A18' })
-    // plus fixture segmen 25-26 ("Samsung Galaxy A18") agar mention terdekat bisa dicari.
-    expect(false).toBe(true);
+  // ============================================================
+// FASE 3 — PRODUCT-VETO (fixture: segmen asli 871JKOxrsNM)
+// ============================================================
+const seg = (index: number, text: string) => ({
+  index, start: '00:00:00,000', end: '00:00:01,000', text
+});
+const mkCtx = (
+  chunkSegments: ReturnType<typeof seg>[],
+  allSegments?: ReturnType<typeof seg>[]
+): EvidenceContext => ({
+  chunkIndex: 0,
+  chunkSegments,
+  chunkText: chunkSegments.map(s => s.text).join(' '),
+  allSegments
+});
+
+const productSegs = [
+  seg(4, 'Nah, yang pertama di Samsung Galaxy A07s.'),
+  seg(11, 'Layarnya PLS LCD berukuran'),
+  seg(12, 'di 6,7 inci,'),
+  seg(25, 'Samsung Galaxy A18.'),
+  seg(34, 'Oktober 2026, layarnya Super AMOLED berukuran di 6,7 inci, layarnya sudah Full HD+, di mana'),
+  seg(38, 'pengisian fast charging di 25 Watt. Oke, kita berlanjut ke Samsung Galaxy A08. Ini lagi'),
+  seg(42, 'Layarnya PLS LCD berukuran di 6,7 inci, sistem operasinya menggunakan Android 17 dan')
+];
+const productCtx = mkCtx(productSegs);
+const EX = 'berukuran di 6,7 inci';
+
+describe('FASE 3 — product-veto', () => {
+  test('12. ANCHOR_ECHO "6,7-inci" + hint A18 → RESOLVED seg 34 via product', () => {
+    const r = resolveProvenanceAnchor(EX, '6,7-inci', productCtx, { productHint: 'Samsung Galaxy A18' });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.via).toBe('product');
+    expect(r.coordinates?.segment_start_index).toBe(34);
+    expect(r.coordinates?.segment_end_index).toBe(34);
   });
+
+  test('13. hint A07s → span 2 segmen 11-12 (model "A07S" ≠ "A07")', () => {
+    const r = resolveProvenanceAnchor(EX, '6,7-inci', productCtx, { productHint: 'Samsung Galaxy A07s' });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(11);
+    expect(r.coordinates?.segment_end_index).toBe(12);
+  });
+
+  test('14. hint A08 → seg 42 (mention dalam segmen yang memuat Oke, kita berlanjut…)', () => {
+    const r = resolveProvenanceAnchor(EX, '6,7-inci', productCtx, { productHint: 'Samsung Galaxy A08' });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(42);
+  });
+
+  test('15. hint produk yang tidak disebut (A99) → AMBIGUOUS', () => {
+    const r = resolveProvenanceAnchor(EX, '6,7-inci', productCtx, { productHint: 'Galaxy A99' });
+    expect(r.status).toBe('AMBIGUOUS');
+    expect(r.coordinates).toBeNull();
+  });
+
+  test('16. tanpa hint / hint kosong → perilaku lama (AMBIGUOUS)', () => {
+    for (const productHint of [undefined, null, '']) {
+      const r = resolveProvenanceAnchor(EX, '6,7-inci', productCtx, { productHint });
+      expect(r.status).toBe('AMBIGUOUS');
+    }
+  });
+
+  test('17. hint perbandingan dua model → ditolak (tidak menebak)', () => {
+    const r = resolveProvenanceAnchor(EX, '6,7-inci', productCtx, {
+      productHint: 'Samsung Galaxy A18 dibanding Galaxy A08'
+    });
+    expect(r.status).toBe('AMBIGUOUS');
+  });
+
+  test('18. anchor null + hint valid → fase 3 tetap dicapai', () => {
+    const r = resolveProvenanceAnchor(EX, null, productCtx, { productHint: 'Samsung Galaxy A18' });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(34);
+  });
+
+  test('19. hint TIDAK mengalahkan anchor yang sudah diskriminatif (via=anchor)', () => {
+    const r = resolveProvenanceAnchor('bukaan f/2.2', 'selfie', context, { productHint: 'Samsung Galaxy A18' });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.via).toBe('anchor');
+    expect(r.coordinates?.segment_start_index).toBe(96);
+  });
+
+  test('20. single occurrence → via=single', () => {
+    const r = resolveProvenanceAnchor(
+      'Oktober 2026, layarnya Super AMOLED berukuran di 6,7 inci',
+      null,
+      productCtx
+    );
+    expect(r.status).toBe('RESOLVED');
+    expect(r.via).toBe('single');
+  });
+
+  test('20A. single occurrence → via=single  verifikasi via findSourceMatches sebelum test assertion', () => {
+  const excerpt = 'Samsung Galaxy A18.';
+  
+  // Sanity: pastikan fixture memang single occurrence
+  const matches = findSourceMatches(excerpt, productCtx, { maxSpan: MAX_VALIDATION_SPAN });
+  expect(matches).toHaveLength(1);  // ← guard fixture error
+  
+  const r = resolveProvenanceAnchor(excerpt, null, productCtx);
+  expect(r.status).toBe('RESOLVED');
+  expect(r.via).toBe('single');
+});
+
+  // --- varian: "5G" ada di SEGMEN BERIKUTNYA (seg 69-70 produksi) ---
+  const variantCtx = mkCtx([
+    seg(46, 'kita berlanjut ke Samsung Galaxy A07 4G. Untuk harga normalnya varian RAM 4 GB dengan internal'),
+    seg(62, 'untuk kamera selfie'),
+    seg(63, 'ada di 8 MP,'),
+    seg(69, 'Lanjut kita untuk Samsung Galaxy A07'),
+    seg(70, 'yang 5G-nya.'),
+    seg(85, 'kamera selfie'),
+    seg(86, 'ada di 8 MP.')
+  ]);
+
+  test('21. varian lewat lookahead: hint A07 5G → seg 85-86', () => {
+    const r = resolveProvenanceAnchor('kamera selfie ada di 8 MP', 'kamera-selfie', variantCtx, {
+      productHint: 'Kamera selfie Samsung Galaxy A07 5G beresolusi 8 MP'
+    });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(85);
+    expect(r.coordinates?.segment_end_index).toBe(86);
+  });
+
+  test('22. varian lewat lookahead: hint A07 4G → seg 62-63 (tanpa lookahead, 5G akan lolos weak-match → AMBIGUOUS)', () => {
+    const r = resolveProvenanceAnchor('kamera selfie ada di 8 MP', 'kamera-selfie', variantCtx, {
+      productHint: 'Kamera selfie Samsung Galaxy A07 4G beresolusi 8 MP'
+    });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(62);
+    expect(r.coordinates?.segment_end_index).toBe(63);
+  });
+
+  test('23. mention di segmen kandidat sendiri dihitung (inklusif); varian membedakan', () => {
+    const c = mkCtx([
+      seg(10, 'Samsung Galaxy A18 4G dengan layar 6,7 inci'),
+      seg(20, 'Samsung Galaxy A18 5G dengan layar 6,7 inci')
+    ]);
+    const r = resolveProvenanceAnchor('layar 6,7 inci', null, c, { productHint: 'Galaxy A18 5G' });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(20);
+  });
+
+  test('24. produk SAMA di dua kandidat → AMBIGUOUS (veto tidak memaksa memilih)', () => {
+    const c = mkCtx([
+      seg(5, 'Samsung Galaxy A18 bagian 1 dengan layar 6,7 inci'),
+      seg(15, 'Samsung Galaxy A18 bagian 2 dengan layar 6,7 inci')
+    ]);
+    const r = resolveProvenanceAnchor('layar 6,7 inci', null, c, { productHint: 'Galaxy A18' });
+    expect(r.status).toBe('AMBIGUOUS');
+  });
+
+  // --- batas chunk: mention di luar chunk ---
+  const chunkSegs = [
+    seg(20, 'baterainya berkapasitas di 5000 mAh'),
+    seg(30, 'Oke lanjut ke Samsung Galaxy A27 5G.'),
+    seg(31, 'baterainya berkapasitas di 5000 mAh')
+  ];
+  const BAT = 'baterainya berkapasitas di 5000 mAh';
+
+  test('25. kandidat tanpa mention dalam chunk = TIDAK DIKETAHUI → AMBIGUOUS (fail-closed)', () => {
+    const r = resolveProvenanceAnchor(BAT, null, mkCtx(chunkSegs), {
+      productHint: 'Samsung Galaxy A17 5G memiliki baterai 5000 mAh'
+    });
+    expect(r.status).toBe('AMBIGUOUS');
+  });
+
+  test('26. allSegments menyediakan mention di luar chunk → RESOLVED seg 20', () => {
+    const all = [seg(10, 'Samsung Galaxy A17 5G.'), ...chunkSegs];
+    const r = resolveProvenanceAnchor(BAT, null, mkCtx(chunkSegs, all), {
+      productHint: 'Samsung Galaxy A17 5G memiliki baterai 5000 mAh'
+    });
+    expect(r.status).toBe('RESOLVED');
+    expect(r.coordinates?.segment_start_index).toBe(20);
+    expect(r.via).toBe('product');
+  });
+});
 });
