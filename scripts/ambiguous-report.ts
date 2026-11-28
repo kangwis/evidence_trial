@@ -30,10 +30,15 @@
 import { MAX_VALIDATION_SPAN, findSourceMatches } from '../src/evidence/search';
 import { normalizeForSearch } from '../src/evidence/srt';
 import type { SRTSegment } from '../src/evidence/srt';
-import { ANCHOR_EXPANSION_RADIUS } from '../src/evidence/validators/anchor-resolver';
+import {
+  ANCHOR_EXPANSION_RADIUS,
+  diagnoseProductVeto,
+  selectProductHint
+} from '../src/evidence/validators/anchor-resolver';
 import type { EvidenceContext, SegmentMatch } from '../src/evidence/types';
 
 export type AmbiguityCategory =
+  | 'PRODUCT_VETO_FAILED'
   | 'NO_ANCHOR'
   | 'GENUINE_DUPLICATE'
   | 'ANCHOR_ECHO'
@@ -44,8 +49,9 @@ export type AmbiguityCategory =
   | 'UNEXPECTED';
 
 const ADVICE: Record<AmbiguityCategory, string> = {
+  PRODUCT_VETO_FAILED: 'klaim memuat produk tapi veto gagal: lihat DETAIL (mention hilang / multi-match / varian)',
   NO_ANCHOR: 'prompt: subtopic wajib terisi bila excerpt generik',
-  GENUINE_DUPLICATE: 'karantina SAH: teks kandidat identik, jangan "diperbaiki"',
+  GENUINE_DUPLICATE: 'teks kandidat identik; hanya konteks produk yang bisa membedakan (pastikan klaim memuat produk)',
   ANCHOR_ECHO: 'prompt: larang subtopic berisi nilai/angka dari excerpt',
   ANCHOR_GENERIC: 'prompt: subtopic harus spesifik (bukan "kamera"/"layar")',
   ANCHOR_GENERIC_WIDE: 'prompt: subtopic harus spesifik; jangan naikkan radius',
@@ -63,6 +69,8 @@ export interface AmbiguousInput {
   excerpt: string;
   subtopic: string | null;
   segments: SRTSegment[]; // segmen chunk asal
+  evContext?: string | null;
+  allSegments?: SRTSegment[];
 }
 
 export interface AmbiguityDiagnosis {
@@ -93,12 +101,25 @@ export function classifyAmbiguity(inp: AmbiguousInput): AmbiguityDiagnosis {
   const ctx: EvidenceContext = {
     chunkIndex: inp.chunk - 1,
     chunkText: inp.segments.map(s => s.text).join(' '),
-    chunkSegments: inp.segments
+    chunkSegments: inp.segments,
+    allSegments: inp.allSegments
   };
   const candidates = findSourceMatches(inp.excerpt, ctx, { maxSpan: MAX_VALIDATION_SPAN });
   const anchorNorm = normalizeForSearch(inp.subtopic || '');
   const done = (category: AmbiguityCategory, detail: string): AmbiguityDiagnosis =>
     ({ category, candidates, anchorNorm, detail });
+
+  // Klaim memuat produk: veto sudah dicoba resolver, jadi yang tersisa = gagal.
+  const hint = selectProductHint(inp.claim, inp.evContext);
+  if (hint) {
+    const diag = diagnoseProductVeto(candidates, hint, ctx);
+    if (diag.reason !== 'NO_HINT' && diag.reason !== 'MIXED_HINT') {
+      return done(
+        diag.reason === 'OK' ? 'UNEXPECTED' : 'PRODUCT_VETO_FAILED',
+        `${diag.reason}: ${diag.perCandidate.join(' | ')}`
+      );
+    }
+  }
 
   if (!anchorNorm) return done('NO_ANCHOR', 'subtopic kosong');
 
@@ -164,10 +185,11 @@ export function collectAmbiguous(results: Array<{
   run: { run_id: string };
   items: Array<{
     accepted: boolean; chunk: number; pos: number; type: string;
-    claim: string; excerpt: string; subtopic?: string | null;
+    claim: string; excerpt: string; subtopic?: string | null; context?: string | null;
     blockingDetails?: Array<{ rule: string; reason: string }>;
   }>;
   chunkSegments?: Map<number, SRTSegment[]>;
+  allSegments?: SRTSegment[];
 }>): AmbiguousInput[] {
   const out: AmbiguousInput[] = [];
   for (const r of results) {
@@ -181,6 +203,7 @@ export function collectAmbiguous(results: Array<{
       out.push({
         runId: r.run.run_id, chunk: it.chunk, pos: it.pos, type: it.type,
         claim: it.claim, excerpt: it.excerpt, subtopic: it.subtopic ?? null, segments
+        , evContext: it.context ?? null, allSegments: r.allSegments
       });
     }
   }
