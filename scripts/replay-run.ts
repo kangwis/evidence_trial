@@ -137,6 +137,8 @@ interface BlockingDetail {
 
 interface ItemDecision {
   subtopic?: string | null;
+  context?: string | null;      // evidence.context, untuk hint produk
+  viaProduct?: boolean;         // PROVENANCE ter-resolve lewat product-veto
   key: string;            // "<chunk 1-based>:<posisi 1-based pada hasil parse>"
   chunk: number;
   pos: number;
@@ -178,6 +180,7 @@ interface ReplayResult {
   run: RunRecord;
   chunks: ChunkReplay[];
   chunkSegments?: Map<number, SRTSegment[]>;
+  allSegments?: SRTSegment[];
   items: ItemDecision[];
   notes: string[];
   rawSha: string;         // hash seluruh file raw yang dipakai (bukti input identik)
@@ -518,7 +521,8 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
     const context: EvidenceContext = {
       chunkIndex,
       chunkText: buildChunkText(chunk),
-      chunkSegments: chunk
+      chunkSegments: chunk,
+      allSegments: segments
     };
 
     let accepted = 0;
@@ -556,6 +560,10 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
         accepted: report.accepted,
         type: String(reconciled.type ?? ''),
         subtopic: reconciled.subtopic ?? null,
+        context: (reconciled.context as string | null | undefined) ?? null,
+        viaProduct: report.results.some(
+          r => r.rule === 'PROVENANCE' && r.code === 'PRODUCT_VETO'
+        ),
         claim: String(ev.claim ?? ''),
         excerpt: String(ev.source_excerpt ?? ''),
         blocking: report.accepted ? [] : Array.from(new Set(blocking)),
@@ -618,6 +626,7 @@ function replayRun(run: RunRecord, withDuplicates: boolean = false): ReplayResul
     return {
     run, chunks, items, notes,
     chunkSegments: chunkSegmentsMap,
+    allSegments: segments,
     rawSha: rawHash.digest('hex').slice(0, 12),
     srtVerified,
     srtContentSha: shortHash(srtText),
@@ -1465,6 +1474,44 @@ function printDiff(results: ReplayResult[], prevPath: string, full: boolean, cur
   if (flips.length === 0) console.log('\n  (tidak ada perubahan keputusan)');
 }
 
+// Daftar SEMUA item yang ter-resolve lewat product-veto. Salah resolve =
+// timestamp keliru yang tampak valid, jadi audit penuh, bukan sampel.
+function printProductVetoReport(results: ReplayResult[]): void {
+  const MENTION_RE = /galaxy\s+a\d{2}s?/i;
+  let total = 0;
+  console.log('='.repeat(78));
+  console.log('PRODUCT-VETO REPORT (item accepted dengan code PRODUCT_VETO)');
+  console.log('='.repeat(78));
+
+  for (const r of results) {
+    const hits = r.items.filter(i => i.accepted && i.viaProduct);
+    if (hits.length === 0) continue;
+    total += hits.length;
+    const all = r.allSegments ?? [];
+    console.log(`\n--- run ${r.run.run_id}  review=${r.run.review_id ?? '-'}  (${hits.length}) ---`);
+
+    for (const it of hits) {
+      const sc = it.sourceCoordinates;
+      const start = sc?.segment_start_index ?? -1;
+      const end = sc?.segment_end_index ?? -1;
+      const spanText = all
+        .filter(s => s.index >= start && s.index <= end)
+        .map(s => `[${s.index}] ${s.text}`)
+        .join(' ');
+      const mention = all
+        .filter(s => s.index <= end && MENTION_RE.test(s.text))
+        .sort((a, b) => b.index - a.index)[0];
+
+      console.log(`\n[c${it.chunk}#${it.pos}] seg=${start}..${end}`);
+      console.log(`  CLAIM   : ${trunc(it.claim, 140)}`);
+      console.log(`  EXCERPT : ${trunc(it.excerpt, 140)}`);
+      console.log(`  SEGMEN  : ${trunc(spanText, 160)}`);
+      console.log(`  MENTION : ${mention ? `[${mention.index}] ${trunc(mention.text, 110)}` : '(tidak ada)'}`);
+    }
+  }
+  console.log(`\nTOTAL ter-resolve lewat product-veto: ${total}`);
+}
+
 // ------------------------------------------------------------
 // CLI
 // ------------------------------------------------------------
@@ -1587,6 +1634,10 @@ function main(): void {
       flag('--full'),
       Number.isFinite(sampleN) ? sampleN : 10
     );
+  }
+
+  if (flag('--product-veto-report')) {
+    printProductVetoReport(results);
   }
 
   if (jsonOut) {
