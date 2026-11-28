@@ -10,7 +10,7 @@ import type {
   FinalStatus
 } from '../types';
 import { GroundingValidator } from './grounding';
-import { ProvenanceValidator } from './provenance';
+import { ProvenanceValidator, selectProductHint } from './provenance';
 import { AssessmentValidator } from './assessment';
 import { ValueValidator } from './value';
 import { AtomicityValidator } from './atomicity';
@@ -33,7 +33,8 @@ export const EvidenceValidator = {
     const provenanceResult = ProvenanceValidator.resolve(
       evidence.source_excerpt,
       evidence.subtopic,
-      context
+      context,
+      { productHint: selectProductHint(evidence.claim, evidence.context) }
     );
     results.push(provenanceResult.result);
 
