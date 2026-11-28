@@ -641,7 +641,8 @@ async function extractEvidence(
         const context: EvidenceContext = {
           chunkIndex,
           chunkText,
-          chunkSegments: chunk
+          chunkSegments: chunk,
+          allSegments: segments
         };
 
         // ▼ Normalisasi string kosong/"null" -> null (sebelum reconcile & validasi)
@@ -1346,7 +1347,8 @@ export function resolveDuplicateActions(
             s =>
               s.index >= mergedCoords.segment_start_index &&
               s.index <= mergedCoords.segment_end_index
-          )
+          ),
+          allSegments: segments
         };
 
         const mergedReport = EvidenceValidator.validate(
