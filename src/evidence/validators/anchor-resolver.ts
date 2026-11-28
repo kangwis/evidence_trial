@@ -80,6 +80,12 @@
 // tripwire SEBALIKNYA: memastikan pelebaran ini BENAR-BENAR
 // menyelesaikan pola di atas, dengan radius yang dibatasi dan
 // koordinat yang tetap sempit. Lihat catatan di file test.
+// ----
+// FASE 3 (product-veto, N-01): jika anchor kosong/tidak diskriminatif
+// dan caller meneruskan productHint (dari claim/context), kandidat
+// disaring berdasarkan produk yang disebut terdekat di transkrip.
+// Ini FILTER (boleh mengurangi), bukan ekspansi. Fail-closed: RESOLVED
+// hanya bila TEPAT 1 kandidat cocok dan tidak ada kandidat tanpa mention.
 // ============================================================
 
 import type {
@@ -88,7 +94,14 @@ import type {
   SegmentMatch
 } from '../types';
 import { MAX_VALIDATION_SPAN, findSourceMatches } from '../search';
-import { normalizeForSearch } from '../srt';
+import { normalizeForSearch, type SRTSegment } from '../srt';
+
+export interface ProvenanceResolution {
+  status: ProvenanceResolutionStatus;
+  coordinates: SourceCoordinates | null;
+  /** Jalur yang menentukan hasil RESOLVED (telemetri). */
+  via?: 'single' | 'anchor' | 'product';
+}
 
 export type ProvenanceResolutionStatus = 'RESOLVED' | 'AMBIGUOUS';
 
@@ -184,40 +197,181 @@ function anchorSupportsSpan(normalizedAnchor: string, spanText: string): boolean
 }
 
 // ------------------------------------------------------------
+// FASE 3 — PRODUCT-VETO
+// ------------------------------------------------------------
+export interface AnchorResolverOptions {
+  /** Teks claim/context yang memuat produk, mis. "Samsung Galaxy A18 5G". */
+  productHint?: string | null;
+}
+
+interface ProductSignal {
+  model: string;           // "A18", "A07S"
+  variant: string | null;  // "4G" | "5G" | "LTE" | "WIFI"
+}
+
+// Varian dicari 30 karakter setelah model, termasuk awal segmen berikutnya
+// (lookahead): "…Galaxy A07" / "yang 5G-nya." (seg 69-70 di data produksi).
+function extractProductSignals(text: string, lookahead = ''): ProductSignal[] {
+  const out: ProductSignal[] = [];
+  const combined = text + lookahead;
+  const re = /\bgalaxy\s+(a\d{2}s?)\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const end = m.index + m[0].length;
+    const v = combined.slice(end, end + 30).match(/\b(4G|5G|LTE|Wi-?Fi)\b/i);
+    out.push({
+      model: m[1].toUpperCase(),
+      variant: v ? v[1].toUpperCase().replace('WI-FI', 'WIFI') : null
+    });
+  }
+  return out;
+}
+
+function buildMentionIndex(
+  segs: SRTSegment[]
+): Array<{ index: number; sig: ProductSignal }> {
+  const sorted = [...segs].sort((a, b) => a.index - b.index);
+  const out: Array<{ index: number; sig: ProductSignal }> = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const seg = sorted[i];
+    const next = sorted[i + 1];
+    const lookahead = next && next.index === seg.index + 1 ? ' ' + next.text : '';
+    const sigs = extractProductSignals(seg.text, lookahead);
+    if (sigs.length > 0) out.push({ index: seg.index, sig: sigs[sigs.length - 1] });
+  }
+  return out;
+}
+
+function productsMatch(hint: ProductSignal, m: ProductSignal): boolean {
+  if (hint.model !== m.model) return false;
+  // Varian hanya menolak bila KEDUANYA terisi dan berbeda (weak match
+  // bila salah satu null; multi-match tetap berujung AMBIGUOUS).
+  return !(hint.variant && m.variant) || hint.variant === m.variant;
+}
+
+type ProductVetoReason =
+  | 'OK' | 'NO_HINT' | 'MIXED_HINT'
+  | 'UNKNOWN_MENTION' | 'NO_MATCH' | 'MULTI_MATCH';
+
+interface ProductVetoOutcome {
+  hit: SegmentMatch | null;
+  reason: ProductVetoReason;
+  perCandidate: string[];
+}
+
+function evaluateProductVeto(
+  pool: SegmentMatch[],
+  hintText: string,
+  context: EvidenceContext
+): ProductVetoOutcome {
+  const hints = extractProductSignals(hintText);
+  if (hints.length === 0) return { hit: null, reason: 'NO_HINT', perCandidate: [] };
+
+  const models = new Set(hints.map(h => h.model));
+  const variants = new Set(hints.map(h => h.variant).filter((v): v is string => !!v));
+  // Klaim perbandingan (dua model) atau dua varian: tidak menebak.
+  if (models.size !== 1 || variants.size > 1) {
+    return { hit: null, reason: 'MIXED_HINT', perCandidate: [] };
+  }
+  const hint: ProductSignal = { model: hints[0].model, variant: [...variants][0] ?? null };
+
+  // Mention dicari di SELURUH video bila tersedia; kandidat tetap dari chunk.
+  const index = buildMentionIndex(context.allSegments ?? context.chunkSegments);
+
+  const matched: SegmentMatch[] = [];
+  const perCandidate: string[] = [];
+  let unknown = false;
+
+  for (const c of pool) {
+    let mention: { index: number; sig: ProductSignal } | null = null;
+    for (let i = index.length - 1; i >= 0; i--) {
+      if (index[i].index <= c.segmentEndIndex) { mention = index[i]; break; }
+    }
+    const span = c.segmentStartIndex === c.segmentEndIndex
+      ? `${c.segmentStartIndex}`
+      : `${c.segmentStartIndex}-${c.segmentEndIndex}`;
+    if (!mention) {
+      unknown = true;
+      perCandidate.push(`${span}: tanpa mention`);
+      continue;
+    }
+    perCandidate.push(
+      `${span}: ${mention.sig.model}${mention.sig.variant ? '/' + mention.sig.variant : ''}@seg${mention.index}`
+    );
+    if (productsMatch(hint, mention.sig)) matched.push(c);
+  }
+
+  // Kandidat tanpa mention = TIDAK DIKETAHUI, bukan "tidak cocok".
+  if (unknown) return { hit: null, reason: 'UNKNOWN_MENTION', perCandidate };
+  if (matched.length === 0) return { hit: null, reason: 'NO_MATCH', perCandidate };
+  if (matched.length > 1) return { hit: null, reason: 'MULTI_MATCH', perCandidate };
+  return { hit: matched[0], reason: 'OK', perCandidate };
+}
+
+/** Hint dari claim; jika claim tak memuat model, pakai context. */
+export function selectProductHint(
+  claim: string | null | undefined,
+  evContext: string | null | undefined
+): string | null {
+  for (const s of [claim, evContext]) {
+    if (typeof s === 'string' && extractProductSignals(s).length > 0) return s;
+  }
+  return null;
+}
+
+/** Diagnostik untuk scripts/ambiguous-report.ts. */
+export function diagnoseProductVeto(
+  pool: SegmentMatch[],
+  hintText: string,
+  context: EvidenceContext
+): { reason: ProductVetoReason; perCandidate: string[] } {
+  const { reason, perCandidate } = evaluateProductVeto(pool, hintText, context);
+  return { reason, perCandidate };
+}
+
+// ------------------------------------------------------------
 // resolveProvenanceAnchor()
 // ------------------------------------------------------------
-
 export function resolveProvenanceAnchor(
   sourceExcerpt: string | null | undefined,
   anchor: string | null | undefined,
-  context: EvidenceContext
+  context: EvidenceContext,
+  options: AnchorResolverOptions = {}
 ): ProvenanceResolution {
+  const AMBIGUOUS: ProvenanceResolution = { status: 'AMBIGUOUS', coordinates: null };
+
   const candidates = findSourceMatches(sourceExcerpt, context, {
     maxSpan: MAX_VALIDATION_SPAN
   });
 
-  // 0 match: bukan tanggung jawab resolver ini (Grounding sudah
-  // FAIL sebelum resolver dipanggil). Defensif: AMBIGUOUS+null.
-  if (candidates.length === 0) {
-    return { status: 'AMBIGUOUS', coordinates: null };
-  }
+  if (candidates.length === 0) return AMBIGUOUS;
 
-  // 1 match → RESOLVED (anchor tidak diperlukan).
   if (candidates.length === 1) {
     return {
       status: 'RESOLVED',
-      coordinates: candidateToCoordinates(candidates[0], context)
+      coordinates: candidateToCoordinates(candidates[0], context),
+      via: 'single'
     };
   }
 
-  // >1 match: anchor wajib ada dan diskriminatif.
+  const byProduct = (pool: SegmentMatch[]): ProvenanceResolution | null => {
+    if (!options.productHint) return null;
+    const { hit } = evaluateProductVeto(pool, options.productHint, context);
+    return hit
+      ? {
+          status: 'RESOLVED',
+          coordinates: candidateToCoordinates(hit, context),
+          via: 'product'
+        }
+      : null;
+  };
+
   const normalizedAnchor = normalizeForSearch(anchor || '');
 
-  if (!normalizedAnchor) {
-    return { status: 'AMBIGUOUS', coordinates: null };
-  }
+  // Tanpa anchor: satu-satunya pembeda yang tersisa adalah produk.
+  if (!normalizedAnchor) return byProduct(candidates) ?? AMBIGUOUS;
 
-  // ---- FASE 1: sempit (perilaku asli, invariant #3 lama) ----
+  // ---- FASE 1: sempit ----
   const supportedNarrow = candidates.filter(candidate =>
     anchorSupportsSpan(normalizedAnchor, getCandidateSpanText(candidate, context))
   );
@@ -225,18 +379,17 @@ export function resolveProvenanceAnchor(
   if (supportedNarrow.length === 1) {
     return {
       status: 'RESOLVED',
-      coordinates: candidateToCoordinates(supportedNarrow[0], context)
+      coordinates: candidateToCoordinates(supportedNarrow[0], context),
+      via: 'anchor'
     };
   }
 
   if (supportedNarrow.length > 1) {
-    // Sudah ambigu di level sempit. Melebarkan jendela hanya akan
-    // menambah kecocokan (superset), tidak pernah mengurangi jadi 1.
-    // Tidak ada gunanya mencoba fase 2 di sini.
-    return { status: 'AMBIGUOUS', coordinates: null };
+    // Ekspansi (fase 2) tidak bisa mengurangi; FILTER produk bisa.
+    return byProduct(supportedNarrow) ?? AMBIGUOUS;
   }
 
-  // ---- FASE 2: lebar (BARU) — hanya dicoba kalau fase 1 = 0 ----
+  // ---- FASE 2: lebar (hanya bila fase 1 = 0) ----
   const supportedWide = candidates.filter(candidate =>
     anchorSupportsSpan(
       normalizedAnchor,
@@ -244,16 +397,15 @@ export function resolveProvenanceAnchor(
     )
   );
 
-  if (supportedWide.length !== 1) {
-    return { status: 'AMBIGUOUS', coordinates: null };
+  if (supportedWide.length === 1) {
+    // Koordinat tetap span SEMPIT asli.
+    return {
+      status: 'RESOLVED',
+      coordinates: candidateToCoordinates(supportedWide[0], context),
+      via: 'anchor'
+    };
   }
 
-  // PENTING: koordinat tetap dari span SEMPIT asli (candidates),
-  // BUKAN dari jendela yang diperluas. Perluasan hanya membantu
-  // menemukan candidate MANA yang didukung anchor -- tidak mengubah
-  // di MANA excerpt literal itu sendiri berada.
-  return {
-    status: 'RESOLVED',
-    coordinates: candidateToCoordinates(supportedWide[0], context)
-  };
+  // >1: saring dalam himpunan yang didukung anchor; 0: anchor tak berguna.
+  return byProduct(supportedWide.length > 1 ? supportedWide : candidates) ?? AMBIGUOUS;
 }
